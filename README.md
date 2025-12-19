@@ -45,6 +45,7 @@ enhanced character motions, and Treesitter integration.
 - 🔎 **Search Modes**: `exact`, `search` (regex), and `fuzzy` search modes
 - 🪟 **Multi Window** jumping
 - 🌐 **Remote Actions**: perform motions in remote locations
+- 🎯 **Remote Text Objects**: operate on any visible text object with labels
 - ⚫ **dot-repeatable** jumps
 - 📡 **highly extensible**: check the [examples](https://github.com/folke/flash.nvim#-examples)
 
@@ -320,6 +321,18 @@ Install the plugin with your preferred package manager:
     remote = {
       remote_op = { restore = true, motion = true },
     },
+    -- options used for remote text objects
+    -- `require("flash").textobject()`
+    textobject = {
+      jump = { pos = "range", autojump = false },
+      search = { multi_window = true, wrap = true },
+      label = { before = { 0, -1 }, after = { 0, 1 }, style = "overlay" },
+      highlight = {
+        backdrop = true,
+        matches = false, -- only show labels, not full match highlight
+      },
+      prompt = { enabled = false },
+    },
   },
   -- options for the floating window that shows the prompt,
   -- for regular jumps
@@ -407,6 +420,14 @@ Install the plugin with your preferred package manager:
     })
     ```
 
+- **textobject**: `require("flash").textobject(opts?)` opens **flash** in **Remote Text Object** mode
+
+  - Labels all visible text objects of a given type (quotes, brackets, etc.)
+  - `opts.around`: `true` for "around" (like `a"`), defaults to `false` for "inside" (like `i"`)
+  - After calling, type a delimiter character: `"`, `'`, `` ` ``, `(`, `)`, `[`, `]`, `{`, `}`, `<`, `>`
+  - Select a label to operate on that text object
+  - **Keymaps are opt-in** - see the [Remote Text Objects example](#remote-text-objects) below
+
 - **jump**: `require("flash").jump(opts?)` opens **flash** with the given options
   - type any number of characters before typing a jump label
 - **VS Code**: some functionality is changed/disabled when running **flash** in **VS Code**:
@@ -428,20 +449,20 @@ to an empty function `labeler = function() end`
 <details><summary>Type Definitions</summary>
 
 ```typescript
-type FlashMatcher = (win: number, state: FlashState) => FlashMatch[];
-type FlashLabeler = (matches: FlashMatch[], state: FlashState) => void;
+type FlashMatcher = (win: number, state: FlashState) => FlashMatch[]
+type FlashLabeler = (matches: FlashMatch[], state: FlashState) => void
 
 interface FlashMatch {
-  win: number;
-  pos: [number, number]; // (1,0)-indexed
-  end_pos: [number, number]; // (1,0)-indexed
-  label?: string | false; // set to false to never show a label for this match
-  highlight?: boolean; // override opts.highlight.matches for this match
+  win: number
+  pos: [number, number] // (1,0)-indexed
+  end_pos: [number, number] // (1,0)-indexed
+  label?: string | false // set to false to never show a label for this match
+  highlight?: boolean // override opts.highlight.matches for this match
 }
 
 // Check the code for the full definition
 // of Flash.State at `lua/flash/state.lua`
-type FlashState = {};
+type FlashState = {}
 ```
 
 </details>
@@ -686,6 +707,48 @@ and `<a-s>` in insert mode, to jump to a label in the picker results.
 ```lua
 require("flash").jump({continue = true})
 ```
+
+</details>
+
+<details><summary>Remote Text Objects</summary>
+
+Operate on any visible text object (quotes, brackets, etc.) with flash labels.
+This allows commands like `cir"` (change inside remote quote) or `dar(` (delete around remote paren).
+
+Add these keymaps to your config (keymaps are **opt-in**, not set by default):
+
+```lua
+{
+  "folke/flash.nvim",
+  keys = {
+    -- ... your other flash keymaps ...
+    {
+      "ir",
+      mode = { "o", "x" },
+      function() require("flash").textobject() end,
+      desc = "Flash inside remote textobject"
+    },
+    {
+      "ar",
+      mode = { "o", "x" },
+      function() require("flash").textobject({ around = true }) end,
+      desc = "Flash around remote textobject"
+    },
+  },
+}
+```
+
+**Supported text objects**: `"`, `'`, `` ` ``, `(`, `)`, `[`, `]`, `{`, `}`, `<`, `>`
+
+**Usage examples**:
+
+- `cir"` - change inside a remote quoted string
+- `dar(` - delete around a remote parenthesized expression
+- `yir{` - yank inside a remote curly brace block
+- `vir"` - visually select inside a remote quote
+
+This is less cognitive overhead than Treesitter Search for simple text objects,
+since you don't need to match the text content - just pick the label.
 
 </details>
 

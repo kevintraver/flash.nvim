@@ -38,4 +38,13 @@ function M.prompt()
   return require("flash.prompt").prompt or ""
 end
 
+--- Remote text object selection.
+--- Shows labels on all visible text objects of the given type,
+--- allowing quick remote operations.
+--- Use `around = true` for "around" mode (like a"), defaults to "inside" (like i")
+---@param opts? Flash.State.Config & { around?: boolean }
+function M.textobject(opts)
+  return require("flash.plugins.textobject").remote(opts)
+end
+
 return M

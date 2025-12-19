@@ -167,9 +167,9 @@ local defaults = {
         -- disable jump labels when not enabled, when using a count,
         -- or when recording/executing registers
         opts.jump_labels = opts.jump_labels
-          and vim.v.count == 0
-          and vim.fn.reg_executing() == ""
-          and vim.fn.reg_recording() == ""
+            and vim.v.count == 0
+            and vim.fn.reg_executing() == ""
+            and vim.fn.reg_recording() == ""
 
         -- Show jump labels only in operator-pending mode
         -- opts.jump_labels = vim.v.count == 0 and vim.fn.mode(true):find("o")
@@ -234,6 +234,23 @@ local defaults = {
     remote = {
       remote_op = { restore = true, motion = true },
     },
+    -- options used for remote text objects
+    -- `require("flash").textobject()`
+    textobject = {
+      jump = { pos = "range", autojump = false },
+      search = { multi_window = true, wrap = true },
+      -- Show SAME label at both delimiters (offset to show on quote chars for "inside" mode)
+      -- before = { 0, -1 } puts label 1 char before pos (on opening delimiter)
+      -- after = { 0, 1 } puts label 1 char after end_pos (on closing delimiter)
+      label = { before = { 0, -1 }, after = { 0, 1 }, style = "overlay" },
+      highlight = {
+        backdrop = true,
+        matches = false, -- only show labels, not full match highlight
+      },
+      prompt = {
+        enabled = false,
+      },
+    },
   },
   -- options for the floating window that shows the prompt,
   -- for regular jumps
@@ -246,8 +263,8 @@ local defaults = {
       border = "none",
       width = 1, -- when <=1 it's a percentage of the editor width
       height = 1,
-      row = -1, -- when negative it's an offset from the bottom
-      col = 0, -- when negative it's an offset from the right
+      row = -1,  -- when negative it's an offset from the bottom
+      col = 0,   -- when negative it's an offset from the right
       zindex = 1000,
     },
   },
