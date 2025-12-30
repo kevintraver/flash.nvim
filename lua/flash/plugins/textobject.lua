@@ -118,63 +118,129 @@ local function is_tag_node(buf, node)
   return end_text:match("^</") and end_text:match(">$")
 end
 
---- Check if a treesitter node represents a valid delimiter pair
+--- Find delimiter positions within a node
+--- Handles: child nodes as delimiters, boundary chars, or scanning within text
 ---@param buf number
 ---@param node TSNode
 ---@param delim {open: string, close: string}
----@return boolean
-local function is_valid_delimiter_node(buf, node, delim)
+---@return {open_row: number, open_col: number, close_row: number, close_col: number}|nil
+local function find_delimiter_positions(buf, node, delim)
   local start_row, start_col, end_row, end_col = node:range()
 
   -- Must be at least 2 characters
   if start_row == end_row and end_col - start_col < 2 then
-    return false
+    return nil
   end
 
+  -- Strategy 1: Look for child nodes that ARE the delimiters
+  -- (e.g., in Lua: bracket_index_expression has [ and ] as children)
+  local open_node, close_node
+  for child in node:iter_children() do
+    local child_type = child:type()
+    if child_type == delim.open and not open_node then
+      open_node = child
+    elseif child_type == delim.close then
+      close_node = child
+    end
+  end
+
+  if open_node and close_node then
+    local osr, osc, oer, oec = open_node:range()
+    local csr, csc, cer, cec = close_node:range()
+    return { open_row = osr, open_col = osc, close_row = cer, close_col = cec - 1 }
+  end
+
+  -- Strategy 2: Check boundary characters (original approach)
   local lines = vim.api.nvim_buf_get_lines(buf, start_row, end_row + 1, false)
   if #lines == 0 then
-    return false
+    return nil
   end
 
-  -- Check boundary characters match delimiters
   local first_char = lines[1]:sub(start_col + 1, start_col + 1)
   local last_char = #lines == 1 and lines[1]:sub(end_col, end_col) or lines[#lines]:sub(end_col, end_col)
 
-  if first_char ~= delim.open or last_char ~= delim.close then
-    return false
+  if first_char == delim.open and last_char == delim.close then
+    return { open_row = start_row, open_col = start_col, close_row = end_row, close_col = end_col - 1 }
+  end
+
+  -- Strategy 3: Scan within node text for delimiters (for prefixed strings like f"...")
+  -- Only for symmetric delimiters (quotes)
+  if delim.open == delim.close then
+    local first_line = lines[1]
+    local open_col_found = nil
+
+    -- Scan forward for opening delimiter
+    for i = start_col + 1, #first_line do
+      if first_line:sub(i, i) == delim.open then
+        open_col_found = i - 1 -- convert to 0-indexed
+        break
+      end
+    end
+
+    if open_col_found then
+      -- Scan backward for closing delimiter
+      local last_line = lines[#lines]
+      local close_col_found = nil
+      local scan_end = #lines == 1 and open_col_found + 1 or 0
+
+      for i = end_col, scan_end + 1, -1 do
+        if last_line:sub(i, i) == delim.close then
+          close_col_found = i - 1 -- convert to 0-indexed
+          break
+        end
+      end
+
+      if close_col_found and (start_row ~= end_row or close_col_found > open_col_found) then
+        return { open_row = start_row, open_col = open_col_found, close_row = end_row, close_col = close_col_found }
+      end
+    end
+  end
+
+  return nil
+end
+
+--- Check if a treesitter node represents a valid delimiter pair
+---@param buf number
+---@param node TSNode
+---@param delim {open: string, close: string}
+---@return boolean, {open_row: number, open_col: number, close_row: number, close_col: number}|nil
+local function is_valid_delimiter_node(buf, node, delim)
+  local positions = find_delimiter_positions(buf, node, delim)
+  if not positions then
+    return false, nil
   end
 
   -- For symmetric delimiters (quotes), verify no unescaped delimiter inside
-  -- This prevents matching spans like: "key": "value"
   if delim.open == delim.close then
+    local lines = vim.api.nvim_buf_get_lines(buf, positions.open_row, positions.close_row + 1, false)
     local content
     if #lines == 1 then
-      content = lines[1]:sub(start_col + 2, end_col - 1)
+      content = lines[1]:sub(positions.open_col + 2, positions.close_col)
     else
-      local parts = { lines[1]:sub(start_col + 2) }
+      local parts = { lines[1]:sub(positions.open_col + 2) }
       for i = 2, #lines - 1 do
         parts[#parts + 1] = lines[i]
       end
-      parts[#parts + 1] = lines[#lines]:sub(1, end_col - 1)
+      parts[#parts + 1] = lines[#lines]:sub(1, positions.close_col)
       content = table.concat(parts, "\n")
     end
 
     if has_unescaped_delimiter(content, delim.open) then
-      return false
+      return false, nil
     end
   end
 
-  return true
+  return true, positions
 end
 
 --- Check if node matches the requested text object type
 ---@param buf number
 ---@param node TSNode
 ---@param ctx {char: string, delim?: table}
----@return boolean
+---@return boolean, {open_row: number, open_col: number, close_row: number, close_col: number}|nil
 local function is_match_node(buf, node, ctx)
   if ctx.char == "t" then
-    return is_tag_node(buf, node)
+    return is_tag_node(buf, node), nil
   end
   return is_valid_delimiter_node(buf, node, ctx.delim)
 end
@@ -254,8 +320,9 @@ end
 ---@param buf number
 ---@param node TSNode
 ---@param ctx {around: boolean, char: string}
+---@param delim_positions? {open_row: number, open_col: number, close_row: number, close_col: number}
 ---@return Pos pos, Pos end_pos, boolean? is_empty, Pos? select_pos, Pos? select_end_pos, boolean? needs_join, number? close_delim_col
-local function get_match_range(buf, node, ctx)
+local function get_match_range(buf, node, ctx, delim_positions)
   -- Handle tags (t)
   if ctx.char == "t" then
     local start_node = node:named_child(0)
@@ -280,20 +347,31 @@ local function get_match_range(buf, node, ctx)
     return get_content_range(buf, er1, ec1, sr2, sc2)
   end
 
-  -- Handle standard delimiters
-  local start_row, start_col, end_row, end_col = node:range()
+  -- Handle standard delimiters - use found positions if available
+  local start_row, start_col, end_row, end_col
+  if delim_positions then
+    start_row = delim_positions.open_row
+    start_col = delim_positions.open_col
+    end_row = delim_positions.close_row
+    end_col = delim_positions.close_col
+  else
+    -- Fallback to node range
+    local nr_start_row, nr_start_col, nr_end_row, nr_end_col = node:range()
+    start_row = nr_start_row
+    start_col = nr_start_col
+    end_row = nr_end_row
+    end_col = nr_end_col - 1 -- TS end_col is exclusive
+  end
+
   local pos = Pos({ start_row + 1, start_col })
-  local end_pos = Pos({ end_row + 1, end_col - 1 })
+  local end_pos = Pos({ end_row + 1, end_col })
 
   if ctx.around then
     return pos, end_pos
   end
 
-  -- Pass end_col - 1 (index of closing char) for consistency with old get_inside_range?
-  -- Wait, get_inside_range expects `end_col` to be the column OF the closing delimiter.
-  -- TS range `end_col` is exclusive, so `end_col - 1` is the index of the last char (the delimiter).
-  -- Correct.
-  return get_inside_range(buf, start_row, start_col, end_row, end_col - 1)
+  -- For inside: get_inside_range expects end_col to be the column OF the closing delimiter
+  return get_inside_range(buf, start_row, start_col, end_row, end_col)
 end
 
 --------------------------------------------------------------------------------
@@ -310,9 +388,10 @@ local function collect_nodes(node, ctx)
     return
   end
 
-  if is_match_node(ctx.buf, node, ctx) then
+  local is_valid, delim_positions = is_match_node(ctx.buf, node, ctx)
+  if is_valid then
     local pos, end_pos, is_empty, select_pos, select_end_pos, needs_join, close_delim_col =
-      get_match_range(ctx.buf, node, ctx)
+      get_match_range(ctx.buf, node, ctx, delim_positions)
     local key = make_key(pos, end_pos)
 
     if not ctx.seen[key] then
@@ -419,48 +498,55 @@ end
 
 --- Perform the actual selection/edit action
 ---@param match Flash.Match.TextObject
-local function perform_selection(match)
+---@param op_state {mode: string, operator: string, register: string}
+local function perform_selection(match, op_state)
   vim.api.nvim_set_current_win(match.win)
-  local mode = vim.fn.mode(true)
-  local is_visual = mode:match("^[vV\x16]")
-  local is_op = mode:sub(1, 2) == "no"
-  local op = vim.v.operator
+  local is_visual = op_state.mode:match("^[vV\x16]")
+  local is_op = op_state.mode:sub(1, 2) == "no"
+  local op = op_state.operator
 
   if match.empty then
     -- Empty match: position cursor between delimiters
     vim.api.nvim_win_set_cursor(match.win, { match.pos[1], match.pos[2] })
     if is_op and op == "c" then
       vim.cmd("startinsert")
+    elseif is_op and op == "y" then
+      -- Yank empty string
+      vim.fn.setreg(op_state.register, "")
     end
+    -- For delete (d) on empty: no-op (nothing to delete)
   elseif match.needs_join then
     -- Multi-line with delimiter at EOL: requires special handling
+    -- Use select_pos/select_end_pos which point to actual content range
+    local sel_start = match.select_pos or match.pos
+    local sel_end = match.select_end_pos or match.end_pos
+    local buf = vim.api.nvim_win_get_buf(match.win)
+
     if is_visual then
-      vim.api.nvim_win_set_cursor(match.win, { match.pos[1], match.pos[2] + 1 })
+      vim.api.nvim_win_set_cursor(match.win, { sel_start[1], sel_start[2] })
       vim.cmd("normal! v")
-      vim.api.nvim_win_set_cursor(match.win, { match.end_pos[1], match.close_delim_col - 1 })
+      vim.api.nvim_win_set_cursor(match.win, { sel_end[1], sel_end[2] })
     elseif is_op and op == "y" then
-      local buf = vim.api.nvim_win_get_buf(match.win)
       local lines = vim.api.nvim_buf_get_text(
         buf,
-        match.pos[1] - 1,
-        match.pos[2] + 1,
-        match.end_pos[1] - 1,
-        match.close_delim_col,
+        sel_start[1] - 1,
+        sel_start[2],
+        sel_end[1] - 1,
+        sel_end[2] + 1,
         {}
       )
-      vim.fn.setreg(vim.v.register, table.concat(lines, "\n"))
-    else
-      local buf = vim.api.nvim_win_get_buf(match.win)
+      vim.fn.setreg(op_state.register, table.concat(lines, "\n"))
+    elseif is_op and (op == "d" or op == "c") then
       vim.api.nvim_buf_set_text(
         buf,
-        match.pos[1] - 1,
-        match.pos[2] + 1,
-        match.end_pos[1] - 1,
-        match.close_delim_col,
+        sel_start[1] - 1,
+        sel_start[2],
+        sel_end[1] - 1,
+        sel_end[2] + 1,
         {}
       )
-      vim.api.nvim_win_set_cursor(match.win, { match.pos[1], match.pos[2] + 1 })
-      if is_op and op == "c" then
+      vim.api.nvim_win_set_cursor(match.win, { sel_start[1], sel_start[2] })
+      if op == "c" then
         vim.cmd("startinsert")
       end
     end
@@ -510,9 +596,15 @@ function M.jump(char, around, opts)
       local Jump = require("flash.jump")
 
       if match.empty or match.needs_join then
+        -- Capture operator state BEFORE exiting (mode will change after exit)
+        local op_state = {
+          mode = vim.fn.mode(true),
+          operator = vim.v.operator,
+          register = vim.v.register,
+        }
         Util.exit()
         vim.schedule(function()
-          perform_selection(match)
+          perform_selection(match, op_state)
         end)
         Jump.on_jump(state)
       else
