@@ -38,8 +38,6 @@ M.aliases = {
 ---@field empty? boolean True if this is an empty inside match (e.g., () or "")
 ---@field select_pos? Pos Actual selection start (may differ from pos for multi-line)
 ---@field select_end_pos? Pos Actual selection end (may differ from end_pos for multi-line)
----@field needs_join? boolean True if lines need to be joined after deletion
----@field close_delim_col? number Column of closing delimiter (for needs_join)
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -251,7 +249,7 @@ end
 ---@param start_col number (0-indexed)
 ---@param end_row number (0-indexed)
 ---@param end_col number (0-indexed, exclusive in TS, but we treat it as bound)
----@return Pos pos, Pos end_pos, boolean is_empty, Pos? select_pos, Pos? select_end_pos, boolean? needs_join, number? close_delim_col
+---@return Pos pos, Pos end_pos, boolean is_empty, Pos? select_pos, Pos? select_end_pos
 local function get_content_range(buf, start_row, start_col, end_row, end_col)
   local pos = Pos({ start_row + 1, start_col })
   local end_pos
@@ -271,23 +269,23 @@ local function get_content_range(buf, start_row, start_col, end_row, end_col)
   -- Handle multi-line special cases
   local lines = vim.api.nvim_buf_get_lines(buf, start_row, end_row + 1, false)
   if is_multiline and #lines > 0 then
-    local select_pos, select_end_pos, needs_join, close_delim_col
+    local select_pos, select_end_pos
 
     local first_line = lines[1] or ""
     local open_at_eol = start_col >= #first_line
 
     if open_at_eol then
+      -- Content starts on the next line
       select_pos = Pos({ start_row + 2, 0 })
-      needs_join = true
-      close_delim_col = end_col
     end
 
     if end_col == 0 and #lines > 1 then
+      -- Closing delimiter is at BOL, content ends on previous line
       local prev_line = lines[#lines - 1]
       select_end_pos = Pos({ end_row, math.max(0, #prev_line - 1) })
     end
 
-    return pos, end_pos, false, select_pos, select_end_pos, needs_join, close_delim_col
+    return pos, end_pos, false, select_pos, select_end_pos
   end
 
   return pos, end_pos, false
@@ -299,7 +297,7 @@ end
 ---@param start_col number
 ---@param end_row number
 ---@param end_col number
----@return Pos pos, Pos end_pos, boolean is_empty, Pos? select_pos, Pos? select_end_pos, boolean? needs_join, number? close_delim_col
+---@return Pos pos, Pos end_pos, boolean is_empty, Pos? select_pos, Pos? select_end_pos
 local function get_inside_range(buf, start_row, start_col, end_row, end_col)
   -- For 1-char delimiters, content starts at start_col + 1 and ends at end_col
   -- (end_col is index of closing char)
@@ -321,7 +319,7 @@ end
 ---@param node TSNode
 ---@param ctx {around: boolean, char: string}
 ---@param delim_positions? {open_row: number, open_col: number, close_row: number, close_col: number}
----@return Pos pos, Pos end_pos, boolean? is_empty, Pos? select_pos, Pos? select_end_pos, boolean? needs_join, number? close_delim_col
+---@return Pos pos, Pos end_pos, boolean? is_empty, Pos? select_pos, Pos? select_end_pos
 local function get_match_range(buf, node, ctx, delim_positions)
   -- Handle tags (t)
   if ctx.char == "t" then
@@ -390,7 +388,7 @@ local function collect_nodes(node, ctx)
 
   local is_valid, delim_positions = is_match_node(ctx.buf, node, ctx)
   if is_valid then
-    local pos, end_pos, is_empty, select_pos, select_end_pos, needs_join, close_delim_col =
+    local pos, end_pos, is_empty, select_pos, select_end_pos =
       get_match_range(ctx.buf, node, ctx, delim_positions)
     local key = make_key(pos, end_pos)
 
@@ -403,8 +401,6 @@ local function collect_nodes(node, ctx)
         empty = is_empty or false,
         select_pos = select_pos,
         select_end_pos = select_end_pos,
-        needs_join = needs_join or false,
-        close_delim_col = close_delim_col,
       })
     end
   end
@@ -496,65 +492,25 @@ end
 -- Operations
 --------------------------------------------------------------------------------
 
---- Perform the actual selection/edit action
+--- Handle empty match selection (e.g., "" or ())
+--- Called only for empty matches where there's no range to select
 ---@param match Flash.Match.TextObject
 ---@param op_state {mode: string, operator: string, register: string}
-local function perform_selection(match, op_state)
+local function perform_empty_selection(match, op_state)
   vim.api.nvim_set_current_win(match.win)
-  local is_visual = op_state.mode:match("^[vV\x16]")
   local is_op = op_state.mode:sub(1, 2) == "no"
   local op = op_state.operator
 
-  if match.empty then
-    -- Empty match: position cursor between delimiters
-    vim.api.nvim_win_set_cursor(match.win, { match.pos[1], match.pos[2] })
-    if is_op and op == "c" then
-      vim.cmd("startinsert")
-    elseif is_op and op == "y" then
-      -- Yank empty string
-      vim.fn.setreg(op_state.register, "")
-    end
-    -- For delete (d) on empty: no-op (nothing to delete)
-  elseif match.needs_join then
-    -- Multi-line with delimiter at EOL: requires special handling
-    -- Use select_pos/select_end_pos which point to actual content range
-    local sel_start = match.select_pos or match.pos
-    local sel_end = match.select_end_pos or match.end_pos
-    local buf = vim.api.nvim_win_get_buf(match.win)
+  -- Position cursor between delimiters
+  vim.api.nvim_win_set_cursor(match.win, { match.pos[1], match.pos[2] })
 
-    if is_visual then
-      vim.api.nvim_win_set_cursor(match.win, { sel_start[1], sel_start[2] })
-      vim.cmd("normal! v")
-      vim.api.nvim_win_set_cursor(match.win, { sel_end[1], sel_end[2] })
-    elseif is_op and op == "y" then
-      local lines = vim.api.nvim_buf_get_text(
-        buf,
-        sel_start[1] - 1,
-        sel_start[2],
-        sel_end[1] - 1,
-        sel_end[2] + 1,
-        {}
-      )
-      vim.fn.setreg(op_state.register, table.concat(lines, "\n"))
-    elseif is_op and (op == "d" or op == "c") then
-      vim.api.nvim_buf_set_text(
-        buf,
-        sel_start[1] - 1,
-        sel_start[2],
-        sel_end[1] - 1,
-        sel_end[2] + 1,
-        {}
-      )
-      vim.api.nvim_win_set_cursor(match.win, { sel_start[1], sel_start[2] })
-      if op == "c" then
-        vim.cmd("startinsert")
-      end
-    end
-  else
-    -- Standard jump: handled by Flash's jump mechanism primarily,
-    -- but we shouldn't get here because M.jump handles standard jumps via Jump.jump.
-    -- This function is only for custom edit logic (empty/needs_join).
+  if is_op and op == "c" then
+    vim.cmd("startinsert")
+  elseif is_op and op == "y" then
+    -- Yank empty string
+    vim.fn.setreg(op_state.register, "")
   end
+  -- For delete (d) on empty: no-op (nothing to delete)
 end
 
 --------------------------------------------------------------------------------
@@ -595,7 +551,8 @@ function M.jump(char, around, opts)
     action = function(match, state)
       local Jump = require("flash.jump")
 
-      if match.empty or match.needs_join then
+      if match.empty then
+        -- Empty match (e.g., "" or ()): no range to select
         -- Capture operator state BEFORE exiting (mode will change after exit)
         local op_state = {
           mode = vim.fn.mode(true),
@@ -604,11 +561,11 @@ function M.jump(char, around, opts)
         }
         Util.exit()
         vim.schedule(function()
-          perform_selection(match, op_state)
+          perform_empty_selection(match, op_state)
         end)
         Jump.on_jump(state)
       else
-        -- Normal case: use Flash's built-in jump
+        -- Use Flash's built-in jump with adjusted positions
         local jump_match = match
         if match.select_pos or match.select_end_pos then
           jump_match = vim.tbl_extend("force", {}, match)
