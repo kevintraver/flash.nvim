@@ -13,7 +13,7 @@ local M = {}
 M.delimiters = {
   ['"'] = { open = '"', close = '"' },
   ["'"] = { open = "'", close = "'" },
-  ["`"] = { open = "`", close = "`" },
+  ["`"] = { open = '`', close = '`' },
   ["("] = { open = "(", close = ")" },
   [")"] = { open = "(", close = ")" },
   ["["] = { open = "[", close = "]" },
@@ -27,12 +27,7 @@ M.delimiters = {
 ---@type table<string, string[]>
 M.aliases = {
   b = { "(", "[", "{" },
-  q = { '"', "'", "`" },
-}
-
----@type table<string, boolean>
-M.special = {
-  t = true, -- HTML/XML tag
+  q = { '"', "'", '`' },
 }
 
 --------------------------------------------------------------------------------
@@ -77,7 +72,7 @@ local function has_unescaped_delimiter(content, delim)
   local i = 1
   while i <= #content do
     local c = content:sub(i, i)
-    if c == "\\" then
+    if c == string.char(92) then
       i = i + 2
     elseif c == delim then
       return true
@@ -88,27 +83,40 @@ local function has_unescaped_delimiter(content, delim)
   return false
 end
 
---- Convert 1D offset to 2D position within lines
----@param offset number 1-based offset into concatenated lines
----@param lines string[] Lines with \n appended
----@param start_line number Starting line number (1-indexed)
----@return number row, number col (1-indexed row, 0-indexed col)
-local function offset_to_pos(offset, lines, start_line)
-  local current_offset = 0
-  for i, line in ipairs(lines) do
-    local line_len = #line
-    if current_offset + line_len >= offset then
-      return start_line + i - 1, offset - current_offset - 1
-    end
-    current_offset = current_offset + line_len
-  end
-  local last_line = lines[#lines] or ""
-  return start_line + #lines - 1, #last_line - 1
-end
-
 --------------------------------------------------------------------------------
 -- Node validation and range calculation
 --------------------------------------------------------------------------------
+
+--- Check if a node is a valid tag element (e.g. <div>...</div>)
+---@param buf number
+---@param node TSNode
+---@return boolean
+local function is_tag_node(buf, node)
+  if node:named_child_count() < 1 then
+    return false
+  end
+  local first = node:named_child(0)
+  local last = node:named_child(node:named_child_count() - 1)
+
+  -- Check start tag
+  local sr, sc, er, ec = first:range()
+  local start_lines = vim.api.nvim_buf_get_text(buf, sr, sc, er, ec, {})
+  local start_text = table.concat(start_lines, "")
+  if not start_text:match("^<[^/]") then
+    return false
+  end
+
+  -- Check self-closing or end tag
+  if first == last then
+    return start_text:match("/>$") ~= nil
+  end
+
+  local lsr, lsc, ler, lec = last:range()
+  local end_lines = vim.api.nvim_buf_get_text(buf, lsr, lsc, ler, lec, {})
+  local end_text = table.concat(end_lines, "")
+
+  return end_text:match("^</") and end_text:match(">$")
+end
 
 --- Check if a treesitter node represents a valid delimiter pair
 ---@param buf number
@@ -159,26 +167,35 @@ local function is_valid_delimiter_node(buf, node, delim)
   return true
 end
 
---- Get range info for "inside" mode
+--- Check if node matches the requested text object type
 ---@param buf number
----@param start_row number
----@param start_col number
----@param end_row number
----@param end_col number
----@return Pos pos, Pos end_pos, boolean is_empty, Pos? select_pos, Pos? select_end_pos, boolean? needs_join, number? close_delim_col
-local function get_inside_range(buf, start_row, start_col, end_row, end_col)
-  local lines = vim.api.nvim_buf_get_lines(buf, start_row, end_row + 1, false)
-  local is_multiline = start_row ~= end_row
-  local first_line = lines[1] or ""
-  local open_at_eol = start_col + 1 >= #first_line
-  local close_col = end_col - 1
-  local close_at_bol = close_col == 0
+---@param node TSNode
+---@param ctx {char: string, delim?: table}
+---@return boolean
+local function is_match_node(buf, node, ctx)
+  if ctx.char == "t" then
+    return is_tag_node(buf, node)
+  end
+  return is_valid_delimiter_node(buf, node, ctx.delim)
+end
 
-  -- Compute label positions (stay on delimiter line if at boundary)
-  local pos = open_at_eol and Pos({ start_row + 1, start_col })
-    or Pos(Util.offset_pos(buf, { start_row + 1, start_col }, { 0, 1 }))
-  local end_pos = close_at_bol and Pos({ end_row + 1, 0 })
-    or Pos(Util.offset_pos(buf, { end_row + 1, end_col - 1 }, { 0, -1 }))
+--- Calculate range for inside text object (handles multi-line selection logic)
+---@param buf number
+---@param start_row number (0-indexed)
+---@param start_col number (0-indexed)
+---@param end_row number (0-indexed)
+---@param end_col number (0-indexed, exclusive in TS, but we treat it as bound)
+---@return Pos pos, Pos end_pos, boolean is_empty, Pos? select_pos, Pos? select_end_pos, boolean? needs_join, number? close_delim_col
+local function get_content_range(buf, start_row, start_col, end_row, end_col)
+  local pos = Pos({ start_row + 1, start_col })
+  local end_pos
+  if end_col == 0 then
+    end_pos = Pos({ end_row + 1, 0 })
+  else
+    end_pos = Pos({ end_row + 1, end_col - 1 })
+  end
+
+  local is_multiline = start_row ~= end_row
 
   -- Check for empty content
   if not is_multiline and (end_pos[1] < pos[1] or (end_pos[1] == pos[1] and end_pos[2] < pos[2])) then
@@ -186,41 +203,97 @@ local function get_inside_range(buf, start_row, start_col, end_row, end_col)
   end
 
   -- Handle multi-line special cases
+  local lines = vim.api.nvim_buf_get_lines(buf, start_row, end_row + 1, false)
   if is_multiline and #lines > 0 then
-    local select_pos, select_end_pos, needs_join, close_delim_col_val
+    local select_pos, select_end_pos, needs_join, close_delim_col
+
+    local first_line = lines[1] or ""
+    local open_at_eol = start_col >= #first_line
 
     if open_at_eol then
       select_pos = Pos({ start_row + 2, 0 })
       needs_join = true
-      close_delim_col_val = close_col
+      close_delim_col = end_col
     end
 
-    if close_at_bol and #lines > 1 then
+    if end_col == 0 and #lines > 1 then
       local prev_line = lines[#lines - 1]
       select_end_pos = Pos({ end_row, math.max(0, #prev_line - 1) })
     end
 
-    return pos, end_pos, false, select_pos, select_end_pos, needs_join, close_delim_col_val
+    return pos, end_pos, false, select_pos, select_end_pos, needs_join, close_delim_col
   end
 
   return pos, end_pos, false
 end
 
---- Get the selection range for a treesitter node
+--- Get range info for "inside" mode (1-char delimiters)
+---@param buf number
+---@param start_row number
+---@param start_col number
+---@param end_row number
+---@param end_col number
+---@return Pos pos, Pos end_pos, boolean is_empty, Pos? select_pos, Pos? select_end_pos, boolean? needs_join, number? close_delim_col
+local function get_inside_range(buf, start_row, start_col, end_row, end_col)
+  -- For 1-char delimiters, content starts at start_col + 1 and ends at end_col
+  -- (end_col is index of closing char)
+  local lines = vim.api.nvim_buf_get_lines(buf, start_row, start_row + 1, false)
+  local open_at_eol = false
+  if #lines > 0 then
+    open_at_eol = (start_col + 1) >= #lines[1]
+  end
+
+  -- We pass start_col + 1 as content start.
+  -- If open_at_eol, content start is effectively start of next line, but get_content_range handles EOL check.
+  -- get_content_range expects start_col to be the column of content start.
+  -- If open_at_eol, start_col+1 is out of bounds of line 1, which get_content_range detects.
+  return get_content_range(buf, start_row, start_col + 1, end_row, end_col)
+end
+
+--- Get the selection range for a node (tag or delimiter)
 ---@param buf number
 ---@param node TSNode
----@param around boolean
+---@param ctx {around: boolean, char: string}
 ---@return Pos pos, Pos end_pos, boolean? is_empty, Pos? select_pos, Pos? select_end_pos, boolean? needs_join, number? close_delim_col
-local function get_node_range(buf, node, around)
+local function get_match_range(buf, node, ctx)
+  -- Handle tags (t)
+  if ctx.char == "t" then
+    local start_node = node:named_child(0)
+    local end_node = node:named_child(node:named_child_count() - 1)
+
+    local sr1, sc1, er1, ec1 = start_node:range()
+    local sr2, sc2, er2, ec2 = end_node:range()
+
+    if ctx.around then
+      -- Around: start of open tag to end of close tag
+      return Pos({ sr1 + 1, sc1 }), Pos({ er2 + 1, ec2 - 1 })
+    end
+
+    -- Inside
+    if start_node == end_node then
+      -- Self-closing, empty content
+      local pos = Pos({ sr1 + 1, sc1 })
+      return pos, pos, true
+    end
+
+    -- Content is between end of start_node and start of end_node
+    return get_content_range(buf, er1, ec1, sr2, sc2)
+  end
+
+  -- Handle standard delimiters
   local start_row, start_col, end_row, end_col = node:range()
   local pos = Pos({ start_row + 1, start_col })
   local end_pos = Pos({ end_row + 1, end_col - 1 })
 
-  if around then
+  if ctx.around then
     return pos, end_pos
   end
 
-  return get_inside_range(buf, start_row, start_col, end_row, end_col)
+  -- Pass end_col - 1 (index of closing char) for consistency with old get_inside_range?
+  -- Wait, get_inside_range expects `end_col` to be the column OF the closing delimiter.
+  -- TS range `end_col` is exclusive, so `end_col - 1` is the index of the last char (the delimiter).
+  -- Correct.
+  return get_inside_range(buf, start_row, start_col, end_row, end_col - 1)
 end
 
 --------------------------------------------------------------------------------
@@ -229,7 +302,7 @@ end
 
 --- Recursively collect matching nodes from treesitter tree
 ---@param node TSNode
----@param ctx {buf: number, win: number, delim: table, around: boolean, from_row: number, to_row: number, matches: Flash.Match.TextObject[], seen: table<string, boolean>}
+---@param ctx {buf: number, win: number, delim?: table, char: string, around: boolean, from_row: number, to_row: number, matches: Flash.Match.TextObject[], seen: table<string, boolean>}
 local function collect_nodes(node, ctx)
   local start_row, _, end_row, _ = node:range()
 
@@ -237,9 +310,9 @@ local function collect_nodes(node, ctx)
     return
   end
 
-  if is_valid_delimiter_node(ctx.buf, node, ctx.delim) then
+  if is_match_node(ctx.buf, node, ctx) then
     local pos, end_pos, is_empty, select_pos, select_end_pos, needs_join, close_delim_col =
-      get_node_range(ctx.buf, node, ctx.around)
+      get_match_range(ctx.buf, node, ctx)
     local key = make_key(pos, end_pos)
 
     if not ctx.seen[key] then
@@ -262,13 +335,14 @@ local function collect_nodes(node, ctx)
   end
 end
 
---- Find delimiter matches using treesitter
+--- Find matches using treesitter
 ---@param win number
----@param delim {open: string, close: string}
+---@param delim? {open: string, close: string}
 ---@param around boolean
 ---@param opts? {from?: Pos, to?: Pos}
+---@param char string
 ---@return Flash.Match.TextObject[]
-local function get_delimiter_matches(win, delim, around, opts)
+local function get_delimiter_matches(win, delim, around, opts, char)
   local buf = vim.api.nvim_win_get_buf(win)
   local info = vim.fn.getwininfo(win)[1]
 
@@ -282,6 +356,7 @@ local function get_delimiter_matches(win, delim, around, opts)
     buf = buf,
     win = win,
     delim = delim,
+    char = char,
     around = around,
     from_row = opts.from and (opts.from[1] - 1) or (info.topline - 1),
     to_row = opts.to and (opts.to[1] - 1) or info.botline,
@@ -307,83 +382,6 @@ local function get_delimiter_matches(win, delim, around, opts)
   return ctx.matches
 end
 
---- Find HTML/XML tag matches using pattern matching
----@param win number
----@param around boolean
----@param opts? {from?: Pos, to?: Pos}
----@return Flash.Match.TextObject[]
-local function get_tag_matches(win, around, opts)
-  local buf = vim.api.nvim_win_get_buf(win)
-  local info = vim.fn.getwininfo(win)[1]
-
-  opts = opts or {}
-  local from_line = opts.from and opts.from[1] or info.topline
-  local to_line = opts.to and opts.to[1] or info.botline
-
-  local lines = vim.api.nvim_buf_get_lines(buf, from_line - 1, to_line, false)
-  for i, line in ipairs(lines) do
-    lines[i] = line .. "\n"
-  end
-  local text = table.concat(lines, "")
-
-  local matches = {}
-  local seen = {}
-  local init = 1
-
-  while init <= #text do
-    local open_start, open_end, tagname = text:find("<(%w+)[^>]*>", init)
-    if not open_start then
-      break
-    end
-
-    local close_pattern = "</" .. tagname .. ">"
-    local close_start, close_end = text:find(close_pattern, open_end + 1, true)
-
-    if close_start then
-      local pos_row, pos_col = offset_to_pos(open_start, lines, from_line)
-      local end_row, end_col = offset_to_pos(close_end, lines, from_line)
-      local key = make_key(Pos({ pos_row, pos_col }), Pos({ end_row, end_col - 1 }))
-
-      if not seen[key] then
-        seen[key] = true
-
-        if around then
-          table.insert(matches, {
-            win = win,
-            pos = Pos({ pos_row, pos_col }),
-            end_pos = Pos({ end_row, end_col - 1 }),
-          })
-        else
-          local inner_start = open_end + 1
-          local inner_end = close_start - 1
-
-          if inner_end >= inner_start then
-            local inner_pos_row, inner_pos_col = offset_to_pos(inner_start, lines, from_line)
-            local inner_end_row, inner_end_col = offset_to_pos(inner_end, lines, from_line)
-            table.insert(matches, {
-              win = win,
-              pos = Pos({ inner_pos_row, inner_pos_col }),
-              end_pos = Pos({ inner_end_row, inner_end_col }),
-            })
-          else
-            local inner_pos_row, inner_pos_col = offset_to_pos(inner_start, lines, from_line)
-            table.insert(matches, {
-              win = win,
-              pos = Pos({ inner_pos_row, inner_pos_col }),
-              end_pos = Pos({ inner_pos_row, inner_pos_col }),
-              empty = true,
-            })
-          end
-        end
-      end
-    end
-
-    init = open_start + 1
-  end
-
-  return matches
-end
-
 --- Collect all matches without sorting
 ---@param win number
 ---@param char string
@@ -407,21 +405,12 @@ local function collect_matches(win, char, around, opts)
     return all_matches
   end
 
-  -- Handle special text objects
-  if M.special[char] then
-    if char == "t" then
-      return get_tag_matches(win, around, opts)
-    end
-    return {}
-  end
-
-  -- Handle regular delimiters
   local delim = M.delimiters[char]
-  if not delim then
+  if not delim and char ~= "t" then
     return {}
   end
 
-  return get_delimiter_matches(win, delim, around, opts)
+  return get_delimiter_matches(win, delim, around, opts, char)
 end
 
 --------------------------------------------------------------------------------
@@ -490,7 +479,7 @@ end
 ---@param char string
 ---@return boolean
 function M.is_supported(char)
-  return M.delimiters[char] ~= nil or M.aliases[char] ~= nil or M.special[char] ~= nil
+  return M.delimiters[char] ~= nil or M.aliases[char] ~= nil or char == "t"
 end
 
 --- Find all text objects of given type in window

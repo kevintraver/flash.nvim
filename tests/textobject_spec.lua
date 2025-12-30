@@ -51,7 +51,7 @@ describe("textobject", function()
     it("has correct delimiter pairs", function()
       assert.same({ open = '"', close = '"' }, TextObject.delimiters['"'])
       assert.same({ open = "'", close = "'" }, TextObject.delimiters["'"])
-      assert.same({ open = "`", close = "`" }, TextObject.delimiters["`"])
+      assert.same({ open = '`', close = '`' }, TextObject.delimiters["`"])
       assert.same({ open = "(", close = ")" }, TextObject.delimiters["("])
       assert.same({ open = "(", close = ")" }, TextObject.delimiters[")"])
       assert.same({ open = "[", close = "]" }, TextObject.delimiters["["])
@@ -65,7 +65,7 @@ describe("textobject", function()
 
   describe("get_matches", function()
     it("returns empty for unsupported char", function()
-      set([[print("hello")]], { 1, 0 }, "lua")
+      set([[print("hello")]] , { 1, 0 }, "lua")
       local win = vim.api.nvim_get_current_win()
 
       local matches = TextObject.get_matches(win, "x", true)
@@ -73,13 +73,43 @@ describe("textobject", function()
     end)
 
     it("returns empty when no treesitter parser available", function()
-      set([[print("hello")]], { 1, 0 })
+      set([[print("hello")]] , { 1, 0 })
       vim.bo.filetype = "nonexistent_filetype_xyz"
       local win = vim.api.nvim_get_current_win()
 
       local matches = TextObject.get_matches(win, '"', true)
       -- Should return empty since there's no treesitter parser
       assert.equals(0, #matches)
+    end)
+
+    it("handles nested tags correctly", function()
+      set([[ 
+        <div>
+          <div id="inner">content</div>
+        </div>
+      ]], {1, 0}, "html")
+      local win = vim.api.nvim_get_current_win()
+      
+      local matches = TextObject.get_matches(win, "t", false)
+      
+      if #matches == 0 then
+        local buf = vim.api.nvim_win_get_buf(win)
+        local ok, parser = pcall(vim.treesitter.get_parser, buf)
+        if not ok or not parser then
+            print("Skipping tag test: no html parser")
+            return
+        end
+      end
+
+      assert.equals(2, #matches)
+      
+      -- Outer div (Match 1)
+      local outer = matches[1]
+      -- Inner div (Match 2)
+      local inner = matches[2]
+      
+      assert.equals(1, outer.pos[1])
+      assert.equals(2, inner.pos[1])
     end)
   end)
 end)
