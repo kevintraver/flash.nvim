@@ -83,15 +83,15 @@ describe("textobject", function()
     end)
 
     it("handles nested tags correctly", function()
-      set([[ 
+      set([[
         <div>
           <div id="inner">content</div>
         </div>
       ]], {1, 0}, "html")
       local win = vim.api.nvim_get_current_win()
-      
+
       local matches = TextObject.get_matches(win, "t", false)
-      
+
       if #matches == 0 then
         local buf = vim.api.nvim_win_get_buf(win)
         local ok, parser = pcall(vim.treesitter.get_parser, buf)
@@ -102,14 +102,69 @@ describe("textobject", function()
       end
 
       assert.equals(2, #matches)
-      
+
       -- Outer div (Match 1)
       local outer = matches[1]
       -- Inner div (Match 2)
       local inner = matches[2]
-      
+
       assert.equals(1, outer.pos[1])
       assert.equals(2, inner.pos[1])
+    end)
+
+    it("finds square brackets when delimiter is child node", function()
+      -- In Lua, t["key"] parses as bracket_index_expression where [ and ] are children
+      set([[local x = t["key"]]], { 1, 0 }, "lua")
+      local win = vim.api.nvim_get_current_win()
+
+      local buf = vim.api.nvim_win_get_buf(win)
+      local ok, parser = pcall(vim.treesitter.get_parser, buf)
+      if not ok or not parser then
+        print("Skipping bracket test: no lua parser")
+        return
+      end
+
+      local inside = TextObject.get_matches(win, "[", false)
+      assert.equals(1, #inside)
+
+      -- Inside should be the content: "key"
+      local m = inside[1]
+      local text = vim.api.nvim_buf_get_text(buf, m.pos[1] - 1, m.pos[2], m.end_pos[1] - 1, m.end_pos[2] + 1, {})
+      assert.equals('"key"', table.concat(text))
+
+      -- Around should include brackets: ["key"]
+      local around = TextObject.get_matches(win, "[", true)
+      assert.equals(1, #around)
+      local ma = around[1]
+      local text_around = vim.api.nvim_buf_get_text(buf, ma.pos[1] - 1, ma.pos[2], ma.end_pos[1] - 1, ma.end_pos[2] + 1, {})
+      assert.equals('["key"]', table.concat(text_around))
+    end)
+
+    it("finds prefixed strings like f-strings", function()
+      set([[msg = f"hello"]], { 1, 0 }, "python")
+      local win = vim.api.nvim_get_current_win()
+
+      local buf = vim.api.nvim_win_get_buf(win)
+      local ok, parser = pcall(vim.treesitter.get_parser, buf)
+      if not ok or not parser then
+        print("Skipping f-string test: no python parser")
+        return
+      end
+
+      local inside = TextObject.get_matches(win, '"', false)
+      assert.equals(1, #inside)
+
+      -- Inside should be content without quotes: hello
+      local m = inside[1]
+      local text = vim.api.nvim_buf_get_text(buf, m.pos[1] - 1, m.pos[2], m.end_pos[1] - 1, m.end_pos[2] + 1, {})
+      assert.equals("hello", table.concat(text))
+
+      -- Around should include quotes but not prefix: "hello"
+      local around = TextObject.get_matches(win, '"', true)
+      assert.equals(1, #around)
+      local ma = around[1]
+      local text_around = vim.api.nvim_buf_get_text(buf, ma.pos[1] - 1, ma.pos[2], ma.end_pos[1] - 1, ma.end_pos[2] + 1, {})
+      assert.equals('"hello"', table.concat(text_around))
     end)
   end)
 end)
