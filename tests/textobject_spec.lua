@@ -15,6 +15,12 @@ describe("textobject", function()
     end
   end
 
+  ---@param from Pos
+  ---@param to Pos
+  local function get_text(from, to)
+    return table.concat(vim.api.nvim_buf_get_text(0, from[1] - 1, from[2], to[1] - 1, to[2] + 1, {}), "\n")
+  end
+
   before_each(function()
     vim.api.nvim_buf_set_lines(0, 0, -1, false, {})
   end)
@@ -51,7 +57,7 @@ describe("textobject", function()
     it("has correct delimiter pairs", function()
       assert.same({ open = '"', close = '"' }, TextObject.delimiters['"'])
       assert.same({ open = "'", close = "'" }, TextObject.delimiters["'"])
-      assert.same({ open = '`', close = '`' }, TextObject.delimiters["`"])
+      assert.same({ open = "`", close = "`" }, TextObject.delimiters["`"])
       assert.same({ open = "(", close = ")" }, TextObject.delimiters["("])
       assert.same({ open = "(", close = ")" }, TextObject.delimiters[")"])
       assert.same({ open = "[", close = "]" }, TextObject.delimiters["["])
@@ -65,7 +71,7 @@ describe("textobject", function()
 
   describe("get_matches", function()
     it("returns empty for unsupported char", function()
-      set([[print("hello")]] , { 1, 0 }, "lua")
+      set([[print("hello")]], { 1, 0 }, "lua")
       local win = vim.api.nvim_get_current_win()
 
       local matches = TextObject.get_matches(win, "x", true)
@@ -73,7 +79,7 @@ describe("textobject", function()
     end)
 
     it("returns empty when no treesitter parser available", function()
-      set([[print("hello")]] , { 1, 0 })
+      set([[print("hello")]], { 1, 0 })
       vim.bo.filetype = "nonexistent_filetype_xyz"
       local win = vim.api.nvim_get_current_win()
 
@@ -83,11 +89,15 @@ describe("textobject", function()
     end)
 
     it("handles nested tags correctly", function()
-      set([[
+      set(
+        [[
         <div>
           <div id="inner">content</div>
         </div>
-      ]], {1, 0}, "html")
+      ]],
+        { 1, 0 },
+        "html"
+      )
       local win = vim.api.nvim_get_current_win()
 
       local matches = TextObject.get_matches(win, "t", false)
@@ -96,8 +106,8 @@ describe("textobject", function()
         local buf = vim.api.nvim_win_get_buf(win)
         local ok, parser = pcall(vim.treesitter.get_parser, buf)
         if not ok or not parser then
-            print("Skipping tag test: no html parser")
-            return
+          print("Skipping tag test: no html parser")
+          return
         end
       end
 
@@ -114,7 +124,7 @@ describe("textobject", function()
 
     it("finds square brackets when delimiter is child node", function()
       -- In Lua, t["key"] parses as bracket_index_expression where [ and ] are children
-      set([[local x = t["key"]]], { 1, 0 }, "lua")
+      set([=[local x = t["key"]]=], { 1, 0 }, "lua")
       local win = vim.api.nvim_get_current_win()
 
       local buf = vim.api.nvim_win_get_buf(win)
@@ -127,17 +137,15 @@ describe("textobject", function()
       local inside = TextObject.get_matches(win, "[", false)
       assert.equals(1, #inside)
 
-      -- Inside should be the content: "key"
+      -- Inside should select the content: "key"
       local m = inside[1]
-      local text = vim.api.nvim_buf_get_text(buf, m.pos[1] - 1, m.pos[2], m.end_pos[1] - 1, m.end_pos[2] + 1, {})
-      assert.equals('"key"', table.concat(text))
+      assert.equals('"key"', get_text(m.select_pos, m.select_end_pos))
 
       -- Around should include brackets: ["key"]
       local around = TextObject.get_matches(win, "[", true)
       assert.equals(1, #around)
       local ma = around[1]
-      local text_around = vim.api.nvim_buf_get_text(buf, ma.pos[1] - 1, ma.pos[2], ma.end_pos[1] - 1, ma.end_pos[2] + 1, {})
-      assert.equals('["key"]', table.concat(text_around))
+      assert.equals('["key"]', get_text(ma.pos, ma.end_pos))
     end)
 
     it("finds prefixed strings like f-strings", function()
@@ -154,17 +162,97 @@ describe("textobject", function()
       local inside = TextObject.get_matches(win, '"', false)
       assert.equals(1, #inside)
 
-      -- Inside should be content without quotes: hello
+      -- Inside should select content without quotes: hello
       local m = inside[1]
-      local text = vim.api.nvim_buf_get_text(buf, m.pos[1] - 1, m.pos[2], m.end_pos[1] - 1, m.end_pos[2] + 1, {})
-      assert.equals("hello", table.concat(text))
+      assert.equals("hello", get_text(m.select_pos, m.select_end_pos))
 
       -- Around should include quotes but not prefix: "hello"
       local around = TextObject.get_matches(win, '"', true)
       assert.equals(1, #around)
       local ma = around[1]
-      local text_around = vim.api.nvim_buf_get_text(buf, ma.pos[1] - 1, ma.pos[2], ma.end_pos[1] - 1, ma.end_pos[2] + 1, {})
-      assert.equals('"hello"', table.concat(text_around))
+      assert.equals('"hello"', get_text(ma.pos, ma.end_pos))
+    end)
+
+    it("labels the delimiters and selects the content inside", function()
+      set([[local a = "hello"]], { 1, 0 }, "lua")
+      local win = vim.api.nvim_get_current_win()
+
+      local m = TextObject.get_matches(win, '"', false)[1]
+      assert.same({ 1, 10 }, { m.pos[1], m.pos[2] })
+      assert.same({ 1, 16 }, { m.end_pos[1], m.end_pos[2] })
+      assert.equals("hello", get_text(m.select_pos, m.select_end_pos))
+    end)
+
+    it("marks empty pairs with the cursor position between the delimiters", function()
+      set([[local a = f("")]], { 1, 0 }, "lua")
+      local win = vim.api.nvim_get_current_win()
+
+      local quote = TextObject.get_matches(win, '"', false)[1]
+      assert.is_true(quote.empty)
+      assert.same({ 1, 13 }, { quote.select_pos[1], quote.select_pos[2] })
+
+      local paren = TextObject.get_matches(win, "(", false)[1]
+      assert.is_false(paren.empty)
+      assert.equals('""', get_text(paren.select_pos, paren.select_end_pos))
+    end)
+
+    it("selects whole lines inside a multi-line block", function()
+      set(
+        [[
+        local t = {
+          a = 1,
+          b = 2,
+        }
+      ]],
+        { 1, 0 },
+        "lua"
+      )
+      local win = vim.api.nvim_get_current_win()
+
+      local m = TextObject.get_matches(win, "{", false)[1]
+      assert.same({ 1, 10 }, { m.pos[1], m.pos[2] })
+      assert.same({ 4, 0 }, { m.end_pos[1], m.end_pos[2] })
+      assert.is_true(m.linewise)
+      assert.same({ 2, 3 }, { m.select_pos[1], m.select_end_pos[1] })
+    end)
+
+    it("selects up to the line end when a block starts mid-line", function()
+      set(
+        [[
+        f({ a,
+        b,
+        })
+      ]],
+        { 1, 0 },
+        "lua"
+      )
+      local win = vim.api.nvim_get_current_win()
+
+      local m = TextObject.get_matches(win, "{", false)[1]
+      assert.is_nil(m.linewise)
+      assert.equals(" a,\nb,", get_text(m.select_pos, m.select_end_pos))
+    end)
+
+    it("selects the exact content of a multi-line tag", function()
+      set(
+        [[
+        <div>
+        <p>x</p>
+        </div>
+      ]],
+        { 1, 0 },
+        "html"
+      )
+      local win = vim.api.nvim_get_current_win()
+
+      local m = TextObject.get_matches(win, "t", false)[1]
+      if not m then
+        print("Skipping multi-line tag test: no html parser")
+        return
+      end
+      -- starts on the line break after <div> and ends on the one before </div>
+      assert.same({ 1, 5 }, { m.select_pos[1], m.select_pos[2] })
+      assert.same({ 2, 8 }, { m.select_end_pos[1], m.select_end_pos[2] })
     end)
   end)
 end)
