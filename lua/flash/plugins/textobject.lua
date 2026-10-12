@@ -47,6 +47,14 @@ M.word_objects = {
 ---@field empty? boolean True if this is an empty inside match (e.g., () or "")
 ---@field select_pos? Pos Selection start, defaults to `pos`
 ---@field select_end_pos? Pos Selection end, defaults to `end_pos`
+---@field visual_end_pos? Pos Charwise selection end in Visual mode, when it differs
+
+---@class Flash.Match.TextObject.Range
+---@field select_pos Pos
+---@field select_end_pos Pos
+---@field empty? boolean
+---@field linewise? boolean
+---@field visual_end_pos? Pos
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -261,28 +269,29 @@ end
 ---@param start_col number (0-indexed) column of the first content character
 ---@param end_row number (0-indexed) row of the closing delimiter
 ---@param end_col number (0-indexed) column of the closing delimiter
----@return Pos select_pos, Pos select_end_pos, boolean is_empty
+---@return Flash.Match.TextObject.Range
 local function get_exact_range(buf, start_row, start_col, end_row, end_col)
   local select_pos = Pos({ start_row + 1, start_col })
   local select_end_pos = end_col > 0 and Pos({ end_row + 1, end_col - 1 })
     or Pos({ end_row, #get_line(buf, end_row - 1) })
   if select_end_pos < select_pos then
-    return select_pos, select_pos, true
+    return { select_pos = select_pos, select_end_pos = select_pos, empty = true }
   end
-  return select_pos, select_end_pos, false
+  return { select_pos = select_pos, select_end_pos = select_end_pos }
 end
 
 --- The text inside a bracket block, following the rules of `i{`:
 --- * after an opening bracket at the end of a line, it starts on the next line
 --- * before a closing bracket with only whitespace in front of it, it ends on
 ---   the last line that isn't just whitespace, and is linewise when it starts
----   at or before the first non-blank of its line
+---   at or before the first non-blank of its line. In Visual mode, it instead
+---   ends on the line break of that line.
 ---@param buf number
 ---@param open_row number (0-indexed)
 ---@param open_col number (0-indexed)
 ---@param close_row number (0-indexed)
 ---@param close_col number (0-indexed)
----@return Pos select_pos, Pos select_end_pos, boolean is_empty, boolean? linewise
+---@return Flash.Match.TextObject.Range
 local function get_block_range(buf, open_row, open_col, close_row, close_col)
   local start_row, start_col = open_row, open_col + 1
   if start_col >= #get_line(buf, open_row) then
@@ -300,27 +309,28 @@ local function get_block_range(buf, open_row, open_col, close_row, close_col)
 
   local select_pos = Pos({ start_row + 1, start_col })
   if last_row < start_row then
-    return select_pos, select_pos, true
+    return { select_pos = select_pos, select_end_pos = select_pos, empty = true }
   end
 
-  if #get_line(buf, start_row):match("^%s*") >= start_col then
-    return Pos({ start_row + 1, 0 }), Pos({ last_row + 1, 0 }), false, true
-  end
-
-  -- An empty last line contributes only the line break before it
   local last_line = get_line(buf, last_row)
-  if last_line == "" then
-    return select_pos, Pos({ last_row, #get_line(buf, last_row - 1) }), false
+  local ret = { select_pos = select_pos, visual_end_pos = Pos({ last_row + 1, #last_line }) }
+  if #get_line(buf, start_row):match("^%s*") >= start_col then
+    ret.select_end_pos, ret.linewise = Pos({ last_row + 1, 0 }), true
+  elseif last_line == "" then
+    -- An empty last line contributes only the line break before it
+    ret.select_end_pos = Pos({ last_row, #get_line(buf, last_row - 1) })
+  else
+    ret.select_end_pos = Pos({ last_row + 1, #last_line - 1 })
   end
-  return select_pos, Pos({ last_row + 1, #last_line - 1 }), false
+  return ret
 end
 
 --- Get the label and selection ranges for a node (tag or delimiter)
 ---@param buf number
 ---@param node TSNode
----@param ctx {around: boolean, char: string}
+---@param ctx {around: boolean, char: string, delim?: {open: string, close: string}}
 ---@param delim_positions? {open_row: number, open_col: number, close_row: number, close_col: number}
----@return Pos pos, Pos end_pos, boolean? is_empty, Pos? select_pos, Pos? select_end_pos, boolean? linewise
+---@return Pos pos, Pos end_pos, Flash.Match.TextObject.Range? inside
 local function get_match_range(buf, node, ctx, delim_positions)
   -- Handle tags (t)
   if ctx.char == "t" then
@@ -337,12 +347,11 @@ local function get_match_range(buf, node, ctx, delim_positions)
 
     -- Self-closing, empty content
     if start_node == end_node then
-      return pos, end_pos, true, pos
+      return pos, end_pos, { select_pos = pos, select_end_pos = pos, empty = true }
     end
 
     -- Content is between end of start_node and start of end_node
-    local select_pos, select_end_pos, is_empty = get_exact_range(buf, er1, ec1, sr2, sc2)
-    return pos, end_pos, is_empty, select_pos, select_end_pos
+    return pos, end_pos, get_exact_range(buf, er1, ec1, sr2, sc2)
   end
 
   ---@cast delim_positions -nil
@@ -354,11 +363,9 @@ local function get_match_range(buf, node, ctx, delim_positions)
   end
 
   if ctx.delim.open == ctx.delim.close then
-    local select_pos, select_end_pos, is_empty = get_exact_range(buf, open_row, open_col + 1, close_row, close_col)
-    return pos, end_pos, is_empty, select_pos, select_end_pos
+    return pos, end_pos, get_exact_range(buf, open_row, open_col + 1, close_row, close_col)
   end
-  local select_pos, select_end_pos, is_empty, linewise = get_block_range(buf, open_row, open_col, close_row, close_col)
-  return pos, end_pos, is_empty, select_pos, select_end_pos, linewise
+  return pos, end_pos, get_block_range(buf, open_row, open_col, close_row, close_col)
 end
 
 --------------------------------------------------------------------------------
@@ -377,21 +384,12 @@ local function collect_nodes(node, ctx)
 
   local is_valid, delim_positions = is_match_node(ctx.buf, node, ctx)
   if is_valid then
-    local pos, end_pos, is_empty, select_pos, select_end_pos, linewise =
-      get_match_range(ctx.buf, node, ctx, delim_positions)
+    local pos, end_pos, inside = get_match_range(ctx.buf, node, ctx, delim_positions)
     local key = make_key(pos, end_pos)
 
     if not ctx.seen[key] then
       ctx.seen[key] = true
-      table.insert(ctx.matches, {
-        win = ctx.win,
-        pos = pos,
-        end_pos = end_pos,
-        empty = is_empty or false,
-        select_pos = select_pos,
-        select_end_pos = select_end_pos,
-        linewise = linewise,
-      })
+      table.insert(ctx.matches, vim.tbl_extend("force", { win = ctx.win, pos = pos, end_pos = end_pos }, inside or {}))
     end
   end
 
@@ -658,6 +656,8 @@ function M.jump(char, around, opts)
         return
       elseif op == "d" and not selection.linewise then
         selection.linewise = deletes_whole_lines(buf, selection)
+      elseif not op and match.visual_end_pos then
+        selection.end_pos, selection.linewise = match.visual_end_pos, false
       end
 
       Jump.jump(selection, state)

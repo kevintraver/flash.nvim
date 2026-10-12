@@ -192,7 +192,7 @@ describe("textobject", function()
       assert.same({ 1, 13 }, { quote.select_pos[1], quote.select_pos[2] })
 
       local paren = TextObject.get_matches(win, "(", false)[1]
-      assert.is_false(paren.empty)
+      assert.is_falsy(paren.empty)
       assert.equals('""', get_text(paren.select_pos, paren.select_end_pos))
     end)
 
