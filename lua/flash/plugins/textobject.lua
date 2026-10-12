@@ -30,6 +30,12 @@ M.aliases = {
   q = { '"', "'", '`' },
 }
 
+---@type table<string, string>
+M.word_objects = {
+  w = "[%w_]+",
+  W = "%S+",
+}
+
 --------------------------------------------------------------------------------
 -- Types
 --------------------------------------------------------------------------------
@@ -457,6 +463,55 @@ local function get_delimiter_matches(win, delim, around, opts, char)
   return ctx.matches
 end
 
+--- Find word matches using pattern matching
+---@param win number
+---@param char string
+---@param around boolean
+---@param opts? {from?: Pos, to?: Pos}
+---@return Flash.Match.TextObject[]
+local function get_word_matches(win, char, around, opts)
+  local pattern = M.word_objects[char]
+  if not pattern then
+    return {}
+  end
+
+  local buf = vim.api.nvim_win_get_buf(win)
+  local info = vim.fn.getwininfo(win)[1]
+
+  opts = opts or {}
+  local from_line = opts.from and opts.from[1] or info.topline
+  local to_line = opts.to and opts.to[1] or info.botline
+  local lines = vim.api.nvim_buf_get_lines(buf, from_line - 1, to_line, false)
+
+  local matches = {}
+  for i, line in ipairs(lines) do
+    local row = from_line + i - 1
+    local start = 1
+    while true do
+      local s, e = line:find(pattern, start)
+      if not s then
+        break
+      end
+      local end_col = e - 1
+      if around then
+        -- Include trailing whitespace for "around" mode
+        local trailing = line:match("^%s+", e + 1)
+        if trailing then
+          end_col = e + #trailing - 1
+        end
+      end
+      table.insert(matches, {
+        win = win,
+        pos = Pos({ row, s - 1 }),
+        end_pos = Pos({ row, end_col }),
+      })
+      start = e + 1
+    end
+  end
+
+  return matches
+end
+
 --- Collect all matches without sorting
 ---@param win number
 ---@param char string
@@ -478,6 +533,11 @@ local function collect_matches(win, char, around, opts)
       end
     end
     return all_matches
+  end
+
+  -- Handle word objects (w, W)
+  if M.word_objects[char] then
+    return get_word_matches(win, char, around, opts)
   end
 
   local delim = M.delimiters[char]
@@ -521,7 +581,10 @@ end
 ---@param char string
 ---@return boolean
 function M.is_supported(char)
-  return M.delimiters[char] ~= nil or M.aliases[char] ~= nil or char == "t"
+  return M.delimiters[char] ~= nil
+    or M.aliases[char] ~= nil
+    or M.word_objects[char] ~= nil
+    or char == "t"
 end
 
 --- Find all text objects of given type in window
@@ -541,13 +604,21 @@ end
 ---@param around boolean
 ---@param opts? Flash.Config
 function M.jump(char, around, opts)
+  local is_word = M.word_objects[char] ~= nil
   local label_before = around and { 0, -1 } or { 0, 0 }
-  local label_after = around and { 0, 1 } or { 0, 0 }
+  local label_after = is_word and false or (around and { 0, 1 } or { 0, 0 })
+
+  -- Word objects use search mode with word boundary prefix
+  local matcher = not is_word and function(win, _, search_opts)
+    return M.get_matches(win, char, around, search_opts)
+  end or nil
+
+  local search_mode = is_word and function(str)
+    return "\\<" .. str
+  end or nil
 
   opts = Config.get({ mode = "textobject" }, opts, {
-    matcher = function(win, _, search_opts)
-      return M.get_matches(win, char, around, search_opts)
-    end,
+    matcher = matcher,
     action = function(match, state)
       local Jump = require("flash.jump")
 
@@ -580,8 +651,11 @@ function M.jump(char, around, opts)
       before = label_before,
       after = label_after,
       format = function(format_opts)
-        -- Skip "after" label if it would overlap with "before"
+        -- Skip "after" label for word objects or if it would overlap with "before"
         if format_opts.after then
+          if is_word then
+            return {}
+          end
           local m = format_opts.match
           if m.pos[1] == m.end_pos[1] and m.end_pos[2] - m.pos[2] <= 1 then
             return {}
@@ -590,8 +664,15 @@ function M.jump(char, around, opts)
         return { { format_opts.match.label, format_opts.hl_group } }
       end,
     },
-    search = { multi_window = true, wrap = true, incremental = false, max_length = 0 },
+    search = {
+      multi_window = true,
+      wrap = true,
+      incremental = is_word, -- incremental search for words
+      max_length = is_word and 999 or 0, -- require typing for words
+      mode = search_mode,
+    },
     jump = { pos = "range" },
+    prompt = { enabled = is_word }, -- show prompt for word search
   })
 
   local state = Repeat.get_state("textobject", opts)
@@ -618,7 +699,7 @@ function M.remote(opts)
   end
 
   if not M.is_supported(char) then
-    vim.notify("Unsupported text object: " .. char .. " (supported: \" ' ` ( ) [ ] { } < > b q t)", vim.log.levels.WARN)
+    vim.notify("Unsupported text object: " .. char .. " (supported: \" ' ` ( ) [ ] { } < > b q t w W)", vim.log.levels.WARN)
     Util.exit()
     return
   end
