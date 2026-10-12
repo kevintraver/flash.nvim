@@ -75,9 +75,7 @@ function M.remote_op(match, state, register)
       end
 
       if state.opts.jump.pos == "range" then
-        vim.api.nvim_win_set_cursor(match.win, match.pos)
-        vim.cmd("normal! v")
-        vim.api.nvim_win_set_cursor(match.win, match.end_pos)
+        M.select_range(match)
       else
         vim.api.nvim_win_set_cursor(match.win, state.opts.jump.pos == "start" and match.pos or match.end_pos)
       end
@@ -88,20 +86,14 @@ function M.remote_op(match, state, register)
       M._jump(match, state, { op = true })
       local to = vim.api.nvim_win_get_cursor(match.win)
 
-      -- if a range was selected, use that instead
-      if vim.fn.mode() == "v" then
-        vim.cmd("normal! v") -- end the selection
-        from = vim.api.nvim_buf_get_mark(0, "<")
-        to = vim.api.nvim_buf_get_mark(0, ">")
+      -- select the range for the operator,
+      -- unless a range was already selected
+      local mode = vim.fn.mode()
+      if mode ~= "v" and mode ~= "V" then
+        vim.api.nvim_win_set_cursor(0, from)
+        vim.cmd("normal! v")
+        vim.api.nvim_win_set_cursor(0, to)
       end
-
-      -- vim.api.nvim_buf_set_mark(0, "[", from[1], from[2], {})
-      -- vim.api.nvim_buf_set_mark(0, "]", to[1], to[2], {})
-
-      -- select the range for the operator
-      vim.api.nvim_win_set_cursor(0, from)
-      vim.cmd("normal! v")
-      vim.api.nvim_win_set_cursor(0, to)
     end
 
     ---@diagnostic disable-next-line: param-type-mismatch
@@ -172,9 +164,7 @@ function M._jump(match, state, opts)
     if vim.fn.mode() == "v" then
       vim.cmd("normal! v")
     end
-    vim.api.nvim_win_set_cursor(match.win, match.pos)
-    vim.cmd("normal! v")
-    vim.api.nvim_win_set_cursor(match.win, match.end_pos)
+    M.select_range(match)
   else
     local pos = state.opts.jump.pos == "start" and match.pos or match.end_pos
 
@@ -197,6 +187,21 @@ function M._jump(match, state, opts)
 
     vim.api.nvim_win_set_cursor(match.win, pos)
   end
+end
+
+-- Visually select the match, linewise for linewise matches.
+-- A position past the end of a line selects its line break.
+---@param match Flash.Match
+function M.select_range(match)
+  vim.api.nvim_win_set_cursor(match.win, match.pos)
+  vim.cmd("normal! " .. (match.linewise and "V" or "v"))
+  -- the cursor can only be on a line break in visual mode,
+  -- so move it there and swap it with the start of the selection
+  if vim.api.nvim_win_get_cursor(match.win)[2] < match.pos[2] then
+    vim.api.nvim_win_set_cursor(match.win, match.pos)
+    vim.cmd("normal! o")
+  end
+  vim.api.nvim_win_set_cursor(match.win, match.end_pos)
 end
 
 ---@param match Flash.Match

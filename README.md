@@ -325,8 +325,9 @@ Install the plugin with your preferred package manager:
     -- `require("flash").textobject()`
     textobject = {
       jump = { pos = "range", autojump = false },
-      search = { multi_window = true, wrap = true },
-      label = { before = { 0, -1 }, after = { 0, 1 }, style = "overlay" },
+      search = { multi_window = true, wrap = true, incremental = false, max_length = 0 },
+      -- show the same label on the opening and closing delimiter
+      label = { before = { 0, 0 }, after = { 0, 0 }, style = "overlay" },
       highlight = {
         backdrop = true,
         matches = false, -- only show labels, not full match highlight
@@ -424,8 +425,10 @@ Install the plugin with your preferred package manager:
 
   - Labels all visible text objects of a given type (quotes, brackets, etc.)
   - `opts.around`: `true` for "around" (like `a"`), defaults to `false` for "inside" (like `i"`)
-  - After calling, type a delimiter character: `"`, `'`, `` ` ``, `(`, `)`, `[`, `]`, `{`, `}`, `<`, `>`
-  - Select a label to operate on that text object
+  - After calling, type a text object character (see [supported text objects](#remote-text-objects))
+  - Select a label to operate on that text object, or `<CR>` for the nearest one
+  - For words (`w`, `W`), type the start of the word first, then select a label
+  - Dot-repeat applies the operator to the same kind of text object at or after the cursor
   - **Keymaps are opt-in** - see the [Remote Text Objects example](#remote-text-objects) below
 
 - **jump**: `require("flash").jump(opts?)` opens **flash** with the given options
@@ -449,20 +452,20 @@ to an empty function `labeler = function() end`
 <details><summary>Type Definitions</summary>
 
 ```typescript
-type FlashMatcher = (win: number, state: FlashState) => FlashMatch[]
-type FlashLabeler = (matches: FlashMatch[], state: FlashState) => void
+type FlashMatcher = (win: number, state: FlashState) => FlashMatch[];
+type FlashLabeler = (matches: FlashMatch[], state: FlashState) => void;
 
 interface FlashMatch {
-  win: number
-  pos: [number, number] // (1,0)-indexed
-  end_pos: [number, number] // (1,0)-indexed
-  label?: string | false // set to false to never show a label for this match
-  highlight?: boolean // override opts.highlight.matches for this match
+  win: number;
+  pos: [number, number]; // (1,0)-indexed
+  end_pos: [number, number]; // (1,0)-indexed
+  label?: string | false; // set to false to never show a label for this match
+  highlight?: boolean; // override opts.highlight.matches for this match
 }
 
 // Check the code for the full definition
 // of Flash.State at `lua/flash/state.lua`
-type FlashState = {}
+type FlashState = {};
 ```
 
 </details>
@@ -738,7 +741,12 @@ Add these keymaps to your config (keymaps are **opt-in**, not set by default):
 }
 ```
 
-**Supported text objects**: `"`, `'`, `` ` ``, `(`, `)`, `[`, `]`, `{`, `}`, `<`, `>`
+**Supported text objects**:
+
+- `"`, `'`, `` ` `` - quoted strings, with `q` for any quote
+- `(`, `)`, `[`, `]`, `{`, `}`, `<`, `>` - brackets, with `b` for any of `()`, `[]`, `{}`
+- `t` - tags
+- `w`, `W` - words, found by typing the start of the word
 
 **Usage examples**:
 
@@ -746,6 +754,7 @@ Add these keymaps to your config (keymaps are **opt-in**, not set by default):
 - `dar(` - delete around a remote parenthesized expression
 - `yir{` - yank inside a remote curly brace block
 - `vir"` - visually select inside a remote quote
+- `dirw` then `fo` and a label - delete a remote word starting with `fo`
 
 This is less cognitive overhead than Treesitter Search for simple text objects,
 since you don't need to match the text content - just pick the label.

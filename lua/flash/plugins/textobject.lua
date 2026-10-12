@@ -13,7 +13,7 @@ local M = {}
 M.delimiters = {
   ['"'] = { open = '"', close = '"' },
   ["'"] = { open = "'", close = "'" },
-  ["`"] = { open = '`', close = '`' },
+  ["`"] = { open = "`", close = "`" },
   ["("] = { open = "(", close = ")" },
   [")"] = { open = "(", close = ")" },
   ["["] = { open = "[", close = "]" },
@@ -27,23 +27,26 @@ M.delimiters = {
 ---@type table<string, string[]>
 M.aliases = {
   b = { "(", "[", "{" },
-  q = { '"', "'", '`' },
+  q = { '"', "'", "`" },
 }
 
----@type table<string, string>
+--- Word text objects: search prefix and full word, as Vim regexes
+---@type table<string, {prefix: string, word: string}>
 M.word_objects = {
-  w = "[%w_]+",
-  W = "%S+",
+  w = { prefix = "\\<", word = "\\k\\+" },
+  W = { prefix = "\\%(^\\|\\s\\)\\zs", word = "\\S\\+" },
 }
 
 --------------------------------------------------------------------------------
 -- Types
 --------------------------------------------------------------------------------
 
+--- `pos` and `end_pos` span the delimiters (where labels are shown),
+--- `select_pos` and `select_end_pos` span the text to operate on.
 ---@class Flash.Match.TextObject: Flash.Match
 ---@field empty? boolean True if this is an empty inside match (e.g., () or "")
----@field select_pos? Pos Actual selection start (may differ from pos for multi-line)
----@field select_end_pos? Pos Actual selection end (may differ from end_pos for multi-line)
+---@field select_pos? Pos Selection start, defaults to `pos`
+---@field select_end_pos? Pos Selection end, defaults to `end_pos`
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -66,6 +69,13 @@ end
 ---@return string
 local function make_key(pos, end_pos)
   return string.format("%d:%d-%d:%d", pos[1], pos[2], end_pos[1], end_pos[2])
+end
+
+---@param buf number
+---@param row number (0-indexed)
+---@return string
+local function get_line(buf, row)
+  return vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ""
 end
 
 --- Check if content contains an unescaped delimiter (for symmetric delimiters like quotes)
@@ -154,14 +164,12 @@ local function find_delimiter_positions(buf, node, delim)
     return { open_row = osr, open_col = osc, close_row = cer, close_col = cec - 1 }
   end
 
-  -- Strategy 2: Check boundary characters (original approach)
-  local lines = vim.api.nvim_buf_get_lines(buf, start_row, end_row + 1, false)
-  if #lines == 0 then
-    return nil
-  end
+  -- Strategy 2: Check boundary characters
+  local first_line = get_line(buf, start_row)
+  local last_line = get_line(buf, end_row)
 
-  local first_char = lines[1]:sub(start_col + 1, start_col + 1)
-  local last_char = #lines == 1 and lines[1]:sub(end_col, end_col) or lines[#lines]:sub(end_col, end_col)
+  local first_char = first_line:sub(start_col + 1, start_col + 1)
+  local last_char = last_line:sub(end_col, end_col)
 
   if first_char == delim.open and last_char == delim.close then
     return { open_row = start_row, open_col = start_col, close_row = end_row, close_col = end_col - 1 }
@@ -170,7 +178,6 @@ local function find_delimiter_positions(buf, node, delim)
   -- Strategy 3: Scan within node text for delimiters (for prefixed strings like f"...")
   -- Only for symmetric delimiters (quotes)
   if delim.open == delim.close then
-    local first_line = lines[1]
     local open_col_found = nil
 
     -- Scan forward for opening delimiter
@@ -183,9 +190,8 @@ local function find_delimiter_positions(buf, node, delim)
 
     if open_col_found then
       -- Scan backward for closing delimiter
-      local last_line = lines[#lines]
       local close_col_found = nil
-      local scan_end = #lines == 1 and open_col_found + 1 or 0
+      local scan_end = start_row == end_row and open_col_found + 1 or 0
 
       for i = end_col, scan_end + 1, -1 do
         if last_line:sub(i, i) == delim.close then
@@ -249,83 +255,72 @@ local function is_match_node(buf, node, ctx)
   return is_valid_delimiter_node(buf, node, ctx.delim)
 end
 
---- Calculate range for inside text object (handles multi-line selection logic)
+--- The exact text between two delimiters, line breaks included, like `i"` and `it`
 ---@param buf number
----@param start_row number (0-indexed)
----@param start_col number (0-indexed)
----@param end_row number (0-indexed)
----@param end_col number (0-indexed, exclusive in TS, but we treat it as bound)
----@return Pos pos, Pos end_pos, boolean is_empty, Pos? select_pos, Pos? select_end_pos
-local function get_content_range(buf, start_row, start_col, end_row, end_col)
-  local pos = Pos({ start_row + 1, start_col })
-  local end_pos
-  if end_col == 0 then
-    end_pos = Pos({ end_row + 1, 0 })
-  else
-    end_pos = Pos({ end_row + 1, end_col - 1 })
+---@param start_row number (0-indexed) row of the first content character
+---@param start_col number (0-indexed) column of the first content character
+---@param end_row number (0-indexed) row of the closing delimiter
+---@param end_col number (0-indexed) column of the closing delimiter
+---@return Pos select_pos, Pos select_end_pos, boolean is_empty
+local function get_exact_range(buf, start_row, start_col, end_row, end_col)
+  local select_pos = Pos({ start_row + 1, start_col })
+  local select_end_pos = end_col > 0 and Pos({ end_row + 1, end_col - 1 })
+    or Pos({ end_row, #get_line(buf, end_row - 1) })
+  if select_end_pos < select_pos then
+    return select_pos, select_pos, true
   end
-
-  local is_multiline = start_row ~= end_row
-
-  -- Check for empty content
-  if not is_multiline and (end_pos[1] < pos[1] or (end_pos[1] == pos[1] and end_pos[2] < pos[2])) then
-    return pos, Pos({ pos[1], pos[2] }), true
-  end
-
-  -- Handle multi-line special cases
-  local lines = vim.api.nvim_buf_get_lines(buf, start_row, end_row + 1, false)
-  if is_multiline and #lines > 0 then
-    local select_pos, select_end_pos
-
-    local first_line = lines[1] or ""
-    local open_at_eol = start_col >= #first_line
-
-    if open_at_eol then
-      -- Content starts on the next line
-      select_pos = Pos({ start_row + 2, 0 })
-    end
-
-    if end_col == 0 and #lines > 1 then
-      -- Closing delimiter is at BOL, content ends on previous line
-      local prev_line = lines[#lines - 1]
-      select_end_pos = Pos({ end_row, math.max(0, #prev_line - 1) })
-    end
-
-    return pos, end_pos, false, select_pos, select_end_pos
-  end
-
-  return pos, end_pos, false
+  return select_pos, select_end_pos, false
 end
 
---- Get range info for "inside" mode (1-char delimiters)
+--- The text inside a bracket block, following the rules of `i{`:
+--- * after an opening bracket at the end of a line, it starts on the next line
+--- * before a closing bracket with only whitespace in front of it, it ends on
+---   the last line that isn't just whitespace, and is linewise when it starts
+---   at or before the first non-blank of its line
 ---@param buf number
----@param start_row number
----@param start_col number
----@param end_row number
----@param end_col number
----@return Pos pos, Pos end_pos, boolean is_empty, Pos? select_pos, Pos? select_end_pos
-local function get_inside_range(buf, start_row, start_col, end_row, end_col)
-  -- For 1-char delimiters, content starts at start_col + 1 and ends at end_col
-  -- (end_col is index of closing char)
-  local lines = vim.api.nvim_buf_get_lines(buf, start_row, start_row + 1, false)
-  local open_at_eol = false
-  if #lines > 0 then
-    open_at_eol = (start_col + 1) >= #lines[1]
+---@param open_row number (0-indexed)
+---@param open_col number (0-indexed)
+---@param close_row number (0-indexed)
+---@param close_col number (0-indexed)
+---@return Pos select_pos, Pos select_end_pos, boolean is_empty, boolean? linewise
+local function get_block_range(buf, open_row, open_col, close_row, close_col)
+  local start_row, start_col = open_row, open_col + 1
+  if start_col >= #get_line(buf, open_row) then
+    start_row, start_col = open_row + 1, 0
   end
 
-  -- We pass start_col + 1 as content start.
-  -- If open_at_eol, content start is effectively start of next line, but get_content_range handles EOL check.
-  -- get_content_range expects start_col to be the column of content start.
-  -- If open_at_eol, start_col+1 is out of bounds of line 1, which get_content_range detects.
-  return get_content_range(buf, start_row, start_col + 1, end_row, end_col)
+  if not get_line(buf, close_row):sub(1, close_col):match("^%s*$") then
+    return get_exact_range(buf, start_row, start_col, close_row, close_col)
+  end
+
+  local last_row = close_row - 1
+  while last_row > open_row and get_line(buf, last_row):match("^%s+$") do
+    last_row = last_row - 1
+  end
+
+  local select_pos = Pos({ start_row + 1, start_col })
+  if last_row < start_row then
+    return select_pos, select_pos, true
+  end
+
+  if #get_line(buf, start_row):match("^%s*") >= start_col then
+    return Pos({ start_row + 1, 0 }), Pos({ last_row + 1, 0 }), false, true
+  end
+
+  -- An empty last line contributes only the line break before it
+  local last_line = get_line(buf, last_row)
+  if last_line == "" then
+    return select_pos, Pos({ last_row, #get_line(buf, last_row - 1) }), false
+  end
+  return select_pos, Pos({ last_row + 1, #last_line - 1 }), false
 end
 
---- Get the selection range for a node (tag or delimiter)
+--- Get the label and selection ranges for a node (tag or delimiter)
 ---@param buf number
 ---@param node TSNode
 ---@param ctx {around: boolean, char: string}
 ---@param delim_positions? {open_row: number, open_col: number, close_row: number, close_col: number}
----@return Pos pos, Pos end_pos, boolean? is_empty, Pos? select_pos, Pos? select_end_pos
+---@return Pos pos, Pos end_pos, boolean? is_empty, Pos? select_pos, Pos? select_end_pos, boolean? linewise
 local function get_match_range(buf, node, ctx, delim_positions)
   -- Handle tags (t)
   if ctx.char == "t" then
@@ -335,47 +330,35 @@ local function get_match_range(buf, node, ctx, delim_positions)
     local sr1, sc1, er1, ec1 = start_node:range()
     local sr2, sc2, er2, ec2 = end_node:range()
 
+    local pos, end_pos = Pos({ sr1 + 1, sc1 }), Pos({ er2 + 1, ec2 - 1 })
     if ctx.around then
-      -- Around: start of open tag to end of close tag
-      return Pos({ sr1 + 1, sc1 }), Pos({ er2 + 1, ec2 - 1 })
+      return pos, end_pos
     end
 
-    -- Inside
+    -- Self-closing, empty content
     if start_node == end_node then
-      -- Self-closing, empty content
-      local pos = Pos({ sr1 + 1, sc1 })
-      return pos, pos, true
+      return pos, end_pos, true, pos
     end
 
     -- Content is between end of start_node and start of end_node
-    return get_content_range(buf, er1, ec1, sr2, sc2)
+    local select_pos, select_end_pos, is_empty = get_exact_range(buf, er1, ec1, sr2, sc2)
+    return pos, end_pos, is_empty, select_pos, select_end_pos
   end
 
-  -- Handle standard delimiters - use found positions if available
-  local start_row, start_col, end_row, end_col
-  if delim_positions then
-    start_row = delim_positions.open_row
-    start_col = delim_positions.open_col
-    end_row = delim_positions.close_row
-    end_col = delim_positions.close_col
-  else
-    -- Fallback to node range
-    local nr_start_row, nr_start_col, nr_end_row, nr_end_col = node:range()
-    start_row = nr_start_row
-    start_col = nr_start_col
-    end_row = nr_end_row
-    end_col = nr_end_col - 1 -- TS end_col is exclusive
-  end
-
-  local pos = Pos({ start_row + 1, start_col })
-  local end_pos = Pos({ end_row + 1, end_col })
-
+  ---@cast delim_positions -nil
+  local open_row, open_col = delim_positions.open_row, delim_positions.open_col
+  local close_row, close_col = delim_positions.close_row, delim_positions.close_col
+  local pos, end_pos = Pos({ open_row + 1, open_col }), Pos({ close_row + 1, close_col })
   if ctx.around then
     return pos, end_pos
   end
 
-  -- For inside: get_inside_range expects end_col to be the column OF the closing delimiter
-  return get_inside_range(buf, start_row, start_col, end_row, end_col)
+  if ctx.delim.open == ctx.delim.close then
+    local select_pos, select_end_pos, is_empty = get_exact_range(buf, open_row, open_col + 1, close_row, close_col)
+    return pos, end_pos, is_empty, select_pos, select_end_pos
+  end
+  local select_pos, select_end_pos, is_empty, linewise = get_block_range(buf, open_row, open_col, close_row, close_col)
+  return pos, end_pos, is_empty, select_pos, select_end_pos, linewise
 end
 
 --------------------------------------------------------------------------------
@@ -394,7 +377,7 @@ local function collect_nodes(node, ctx)
 
   local is_valid, delim_positions = is_match_node(ctx.buf, node, ctx)
   if is_valid then
-    local pos, end_pos, is_empty, select_pos, select_end_pos =
+    local pos, end_pos, is_empty, select_pos, select_end_pos, linewise =
       get_match_range(ctx.buf, node, ctx, delim_positions)
     local key = make_key(pos, end_pos)
 
@@ -407,6 +390,7 @@ local function collect_nodes(node, ctx)
         empty = is_empty or false,
         select_pos = select_pos,
         select_end_pos = select_end_pos,
+        linewise = linewise,
       })
     end
   end
@@ -463,53 +447,37 @@ local function get_delimiter_matches(win, delim, around, opts, char)
   return ctx.matches
 end
 
---- Find word matches using pattern matching
----@param win number
+--- Expand a search match at the start of a word to the whole word,
+--- plus trailing (or else leading) whitespace for "around", like `aw`
+---@param match Flash.Match
 ---@param char string
 ---@param around boolean
----@param opts? {from?: Pos, to?: Pos}
----@return Flash.Match.TextObject[]
-local function get_word_matches(win, char, around, opts)
-  local pattern = M.word_objects[char]
-  if not pattern then
-    return {}
+---@return Flash.Match
+local function get_word_match(match, char, around)
+  local buf = vim.api.nvim_win_get_buf(match.win)
+  local line = get_line(buf, match.pos[1] - 1)
+  -- `\k` depends on the buffer's 'iskeyword'
+  local _, s, e = unpack(vim.api.nvim_buf_call(buf, function()
+    return vim.fn.matchstrpos(line, "^" .. M.word_objects[char].word, match.pos[2])
+  end))
+  if s == -1 then
+    return match
   end
 
-  local buf = vim.api.nvim_win_get_buf(win)
-  local info = vim.fn.getwininfo(win)[1]
-
-  opts = opts or {}
-  local from_line = opts.from and opts.from[1] or info.topline
-  local to_line = opts.to and opts.to[1] or info.botline
-  local lines = vim.api.nvim_buf_get_lines(buf, from_line - 1, to_line, false)
-
-  local matches = {}
-  for i, line in ipairs(lines) do
-    local row = from_line + i - 1
-    local start = 1
-    while true do
-      local s, e = line:find(pattern, start)
-      if not s then
-        break
-      end
-      local end_col = e - 1
-      if around then
-        -- Include trailing whitespace for "around" mode
-        local trailing = line:match("^%s+", e + 1)
-        if trailing then
-          end_col = e + #trailing - 1
-        end
-      end
-      table.insert(matches, {
-        win = win,
-        pos = Pos({ row, s - 1 }),
-        end_pos = Pos({ row, end_col }),
-      })
-      start = e + 1
+  if around then
+    local trailing = vim.fn.matchend(line, "^\\s\\+", e)
+    if trailing ~= -1 then
+      e = trailing
+    else
+      local leading = vim.fn.match(line:sub(1, s), "\\s\\+$")
+      s = leading ~= -1 and leading or s
     end
   end
 
-  return matches
+  return vim.tbl_extend("force", {}, match, {
+    pos = Pos({ match.pos[1], s }),
+    end_pos = Pos({ match.pos[1], e - 1 }),
+  })
 end
 
 --- Collect all matches without sorting
@@ -535,11 +503,6 @@ local function collect_matches(win, char, around, opts)
     return all_matches
   end
 
-  -- Handle word objects (w, W)
-  if M.word_objects[char] then
-    return get_word_matches(win, char, around, opts)
-  end
-
   local delim = M.delimiters[char]
   if not delim and char ~= "t" then
     return {}
@@ -552,25 +515,49 @@ end
 -- Operations
 --------------------------------------------------------------------------------
 
---- Handle empty match selection (e.g., "" or ())
---- Called only for empty matches where there's no range to select
+--- Handle empty match selection (e.g., "" or ()) when not changing or deleting it
 ---@param match Flash.Match.TextObject
 ---@param op_state {mode: string, operator: string, register: string}
 local function perform_empty_selection(match, op_state)
   vim.api.nvim_set_current_win(match.win)
-  local is_op = op_state.mode:sub(1, 2) == "no"
-  local op = op_state.operator
 
   -- Position cursor between delimiters
-  vim.api.nvim_win_set_cursor(match.win, { match.pos[1], match.pos[2] })
+  vim.api.nvim_win_set_cursor(match.win, match.select_pos)
 
-  if is_op and op == "c" then
-    vim.cmd("startinsert")
-  elseif is_op and op == "y" then
+  if op_state.mode:sub(1, 2) == "no" and op_state.operator == "y" then
     -- Yank empty string
     vim.fn.setreg(op_state.register, "")
   end
-  -- For delete (d) on empty: no-op (nothing to delete)
+end
+
+--- Whether `d` on this charwise range deletes whole lines, like it does for
+--- motions spanning lines with only whitespace before the start and after the end
+---@param buf number
+---@param match Flash.Match
+---@return boolean
+local function deletes_whole_lines(buf, match)
+  local pos, end_pos = match.pos, match.end_pos
+  return pos[1] < end_pos[1]
+    and #get_line(buf, pos[1] - 1):match("^%s*") >= pos[2]
+    and get_line(buf, end_pos[1] - 1):sub(end_pos[2] + 2):match("^%s*$") ~= nil
+end
+
+--- The innermost text object around the cursor, or else the next one after it
+---@param state Flash.State
+---@return Flash.Match?
+local function get_repeat_match(state)
+  local cursor = Pos(state.win)
+  local around, after ---@type Flash.Match?, Flash.Match?
+  for _, m in ipairs(state.results) do
+    if m.win == state.win and m.end_pos >= cursor then
+      if m.pos <= cursor then
+        around = (not around or m.pos > around.pos) and m or around
+      else
+        after = (not after or m.pos < after.pos) and m or after
+      end
+    end
+  end
+  return around or after
 end
 
 --------------------------------------------------------------------------------
@@ -581,10 +568,7 @@ end
 ---@param char string
 ---@return boolean
 function M.is_supported(char)
-  return M.delimiters[char] ~= nil
-    or M.aliases[char] ~= nil
-    or M.word_objects[char] ~= nil
-    or char == "t"
+  return M.delimiters[char] ~= nil or M.aliases[char] ~= nil or M.word_objects[char] ~= nil or char == "t"
 end
 
 --- Find all text objects of given type in window
@@ -604,26 +588,62 @@ end
 ---@param around boolean
 ---@param opts? Flash.Config
 function M.jump(char, around, opts)
-  local is_word = M.word_objects[char] ~= nil
-  local label_before = around and { 0, -1 } or { 0, 0 }
-  local label_after = is_word and false or (around and { 0, 1 } or { 0, 0 })
+  local word = M.word_objects[char]
 
-  -- Word objects use search mode with word boundary prefix
-  local matcher = not is_word and function(win, _, search_opts)
-    return M.get_matches(win, char, around, search_opts)
-  end or nil
+  -- Words are too numerous to label up front, so type the start of one first
+  local word_opts = word
+    and {
+      search = {
+        mode = function(str)
+          return word.prefix .. "\\V" .. str:gsub("\\", "\\\\")
+        end,
+        incremental = true,
+        max_length = false,
+      },
+      label = { before = { 0, 0 }, after = false },
+      prompt = { enabled = true },
+    }
 
-  local search_mode = is_word and function(str)
-    return "\\<" .. str
-  end or nil
-
-  opts = Config.get({ mode = "textobject" }, opts, {
-    matcher = matcher,
+  opts = Config.get({ mode = "textobject" }, word_opts, opts, {
+    matcher = not word and function(win, _, search_opts)
+      return M.get_matches(win, char, around, search_opts)
+    end or nil,
     action = function(match, state)
       local Jump = require("flash.jump")
+      ---@cast match Flash.Match.TextObject
 
-      if match.empty then
-        -- Empty match (e.g., "" or ()): no range to select
+      if word then
+        match = get_word_match(match, char, around)
+      end
+
+      local buf = vim.api.nvim_win_get_buf(match.win)
+      local op = vim.fn.mode(true):sub(1, 2) == "no" and vim.v.operator or nil
+      local selection = vim.tbl_extend("force", {}, match, {
+        pos = match.select_pos or match.pos,
+        end_pos = match.select_end_pos or match.end_pos,
+      })
+
+      if match.empty and (op == "c" or op == "d") then
+        -- There is no empty selection, so insert a space and operate on that.
+        -- `c` then starts Insert mode between the delimiters (idea from targets.vim)
+        local row, col = selection.pos[1] - 1, selection.pos[2]
+        vim.api.nvim_buf_set_text(buf, row, col, row, col, { " " })
+        selection.end_pos = selection.pos
+
+        -- Keep the space out of the registers
+        local registers = {}
+        for _, name in ipairs({ '"', "-", vim.v.register }) do
+          registers[name] = vim.fn.getreginfo(name)
+        end
+        vim.api.nvim_create_autocmd("TextYankPost", {
+          once = true,
+          callback = function()
+            for name, info in pairs(registers) do
+              vim.fn.setreg(name, info)
+            end
+          end,
+        })
+      elseif match.empty then
         -- Capture operator state BEFORE exiting (mode will change after exit)
         local op_state = {
           mode = vim.fn.mode(true),
@@ -635,53 +655,40 @@ function M.jump(char, around, opts)
           perform_empty_selection(match, op_state)
         end)
         Jump.on_jump(state)
-      else
-        -- Use Flash's built-in jump with adjusted positions
-        local jump_match = match
-        if match.select_pos or match.select_end_pos then
-          jump_match = vim.tbl_extend("force", {}, match)
-          jump_match.pos = match.select_pos or match.pos
-          jump_match.end_pos = match.select_end_pos or match.end_pos
-        end
-        Jump.jump(jump_match, state)
-        Jump.on_jump(state)
+        return
+      elseif op == "d" and not selection.linewise then
+        selection.linewise = deletes_whole_lines(buf, selection)
       end
+
+      Jump.jump(selection, state)
+      Jump.on_jump(state)
     end,
-    label = {
-      before = label_before,
-      after = label_after,
-      format = function(format_opts)
-        -- Skip "after" label for word objects or if it would overlap with "before"
-        if format_opts.after then
-          if is_word then
-            return {}
-          end
-          local m = format_opts.match
-          if m.pos[1] == m.end_pos[1] and m.end_pos[2] - m.pos[2] <= 1 then
-            return {}
-          end
-        end
-        return { { format_opts.match.label, format_opts.hl_group } }
-      end,
-    },
-    search = {
-      multi_window = true,
-      wrap = true,
-      incremental = is_word, -- incremental search for words
-      max_length = is_word and 999 or 0, -- require typing for words
-      mode = search_mode,
-    },
-    jump = { pos = "range" },
-    prompt = { enabled = is_word }, -- show prompt for word search
   })
 
   local state = Repeat.get_state("textobject", opts)
-  state:loop({
-    restore = true,
-    abort = function()
-      Util.exit()
-    end,
-  })
+
+  local match ---@type Flash.Match?
+  if Repeat.is_repeat then
+    -- Dot-repeat can't wait for a label, since the redo buffer would feed it
+    -- the text inserted by `c`. Use the text object at or after the cursor.
+    match = get_repeat_match(state)
+  elseif word then
+    state:loop({ restore = true, abort = Util.exit })
+    return state
+  else
+    -- A label picks a text object and <CR> the nearest one.
+    -- Any other key aborts, like an invalid built-in text object.
+    local key = state:get_char()
+    match = key == Util.CR and state.target or key and state:find({ label = key })
+  end
+
+  if match then
+    state:jump(match)
+  else
+    state:restore()
+    Util.exit()
+  end
+  state:hide()
 
   return state
 end
@@ -692,18 +699,23 @@ function M.remote(opts)
   opts = opts or {}
   local around = opts.around or false
 
-  local char = vim.fn.getcharstr()
-  if not char or char == Util.ESC then
+  -- Dot-repeat reuses the text object type and only asks for a new label
+  local char = Repeat.is_repeat and M.last_char or vim.fn.getcharstr()
+  if char == Util.ESC then
     Util.exit()
     return
   end
 
   if not M.is_supported(char) then
-    vim.notify("Unsupported text object: " .. char .. " (supported: \" ' ` ( ) [ ] { } < > b q t w W)", vim.log.levels.WARN)
+    vim.notify(
+      "Unsupported text object: " .. char .. " (supported: \" ' ` ( ) [ ] { } < > b q t w W)",
+      vim.log.levels.WARN
+    )
     Util.exit()
     return
   end
 
+  M.last_char = char
   return M.jump(char, around, opts)
 end
 
