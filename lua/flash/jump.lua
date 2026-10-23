@@ -70,9 +70,7 @@ function M.remote_op(match, state, register)
     -- use a new motion to select the text-object to act on,
     -- unless we're jumping to a range
     if motion then
-      if vim.fn.mode() == "v" then
-        vim.cmd("normal! v")
-      end
+      M.exit_visual()
 
       if state.opts.jump.pos == "range" then
         M.select_range(match)
@@ -161,9 +159,7 @@ function M._jump(match, state, opts)
   M.open_folds(match)
   -- select range
   if state.opts.jump.pos == "range" then
-    if vim.fn.mode() == "v" then
-      vim.cmd("normal! v")
-    end
+    M.exit_visual()
     M.select_range(match)
   else
     local pos = state.opts.jump.pos == "start" and match.pos or match.end_pos
@@ -186,6 +182,14 @@ function M._jump(match, state, opts)
     pos[2] = math.max(0, pos[2])
 
     vim.api.nvim_win_set_cursor(match.win, pos)
+  end
+end
+
+-- Leave any Visual mode, so that a new selection doesn't keep its start
+function M.exit_visual()
+  local mode = vim.fn.mode()
+  if mode == "v" or mode == "V" or mode == "\22" then
+    vim.cmd("normal! " .. mode)
   end
 end
 
