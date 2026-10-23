@@ -121,6 +121,27 @@ local function has_unescaped_delimiter(content, delim)
   return false
 end
 
+--- Check that the bracket opening the text closes at its end, and not before,
+--- unlike in `(a) + (b)`
+---@param text string
+---@param delim {open: string, close: string}
+---@return boolean
+local function closes_at_end(text, delim)
+  local depth = 0
+  for i = 1, #text do
+    local c = text:sub(i, i)
+    if c == delim.open then
+      depth = depth + 1
+    elseif c == delim.close then
+      depth = depth - 1
+      if depth == 0 then
+        return i == #text
+      end
+    end
+  end
+  return false
+end
+
 --------------------------------------------------------------------------------
 -- Node validation and range calculation
 --------------------------------------------------------------------------------
@@ -195,7 +216,11 @@ local function find_delimiter_positions(buf, node, delim)
   local first_char = first_line:sub(start_col + 1, start_col + 1)
   local last_char = last_line:sub(end_col, end_col)
 
-  if first_char == delim.open and last_char == delim.close then
+  if
+    first_char == delim.open
+    and last_char == delim.close
+    and (delim.open == delim.close or closes_at_end(vim.treesitter.get_node_text(node, buf), delim))
+  then
     return { open_row = start_row, open_col = start_col, close_row = end_row, close_col = end_col - 1 }
   end
 

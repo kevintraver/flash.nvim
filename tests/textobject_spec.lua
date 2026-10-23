@@ -196,6 +196,16 @@ describe("textobject", function()
       assert.equals('"x"  ', get_text(m.pos, m.end_pos))
     end)
 
+    it("doesn't pair the brackets of separate expressions", function()
+      set([[local x = (a) + (b)]], { 1, 0 }, "lua")
+      local win = vim.api.nvim_get_current_win()
+
+      local texts = vim.tbl_map(function(m)
+        return get_text(m.pos, m.end_pos)
+      end, TextObject.get_matches(win, "(", true))
+      assert.same({ "(a)", "(b)" }, texts)
+    end)
+
     it("marks empty pairs with the cursor position between the delimiters", function()
       set([[local a = f("")]], { 1, 0 }, "lua")
       local win = vim.api.nvim_get_current_win()
