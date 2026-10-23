@@ -741,7 +741,20 @@ function M.jump(char, around, opts)
         selection.end_pos, selection.linewise = match.visual_end_pos, false
       end
 
-      Jump.jump(selection, state)
+      if op and match.win ~= vim.api.nvim_get_current_win() then
+        -- Run the operator again in the other window, on a text object that
+        -- selects the match, so `.` repeats it like any other text object
+        M.pending = { match = selection, state = state }
+        local register = vim.v.register
+        Util.exit()
+        vim.schedule(function()
+          vim.api.nvim_set_current_win(match.win)
+          vim.api.nvim_feedkeys('"' .. register .. op, "n", false)
+          vim.api.nvim_feedkeys(Util.t("<Plug>(flash-textobject)"), "m", false)
+        end)
+      else
+        Jump.jump(selection, state)
+      end
       Jump.on_jump(state)
     end,
   })
@@ -762,7 +775,7 @@ function M.jump(char, around, opts)
   local state ---@type Flash.State
   if Repeat.is_repeat or repeatable then
     state = Repeat.get_state("textobject", opts)
-    M.last_char = char
+    M.last_char, M.last_around = char, around
   else
     state = require("flash.state").new(opts)
   end
@@ -804,10 +817,25 @@ function M.jump(char, around, opts)
   return state
 end
 
+--- Selects the match picked in another window, after switching to it.
+--- On dot-repeat, selects the nearest text object of the last type instead.
+function M.select_pending()
+  local pending = M.pending
+  M.pending = nil
+  if pending then
+    require("flash.jump").jump(pending.match, pending.state)
+  else
+    M.jump(M.last_char, M.last_around)
+  end
+end
+
+vim.keymap.set("o", "<Plug>(flash-textobject)", M.select_pending)
+
 --- Remote text object selection entry point
 ---@param opts? Flash.Config & { around?: boolean }
 function M.remote(opts)
   opts = opts or {}
+  M.pending = nil
   local around = opts.around or false
 
   -- Dot-repeat reuses the text object type
