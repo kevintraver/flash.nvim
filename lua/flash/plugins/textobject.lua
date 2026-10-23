@@ -606,7 +606,7 @@ function M.jump(char, around, opts)
   local mode_opts ---@type Flash.Config?
   if word then
     -- Words are too numerous to label up front, so type the start of one first,
-    -- labeled like `jump()`
+    -- then pick the word, like `treesitter_search()`
     mode_opts = {
       search = {
         mode = function(str)
@@ -615,7 +615,7 @@ function M.jump(char, around, opts)
         incremental = true,
         max_length = false,
       },
-      label = { before = false, after = true, style = "overlay" },
+      highlight = { matches = true },
       prompt = { enabled = true },
     }
   elseif not around then
@@ -624,9 +624,19 @@ function M.jump(char, around, opts)
   end
 
   opts = Config.get({ mode = "textobject" }, mode_opts, opts, {
-    matcher = not word and function(win, _, search_opts)
-      return M.get_matches(win, char, around, search_opts)
-    end or nil,
+    matcher = function(win, state, search_opts)
+      if not word then
+        return M.get_matches(win, char, around, search_opts)
+      end
+      local matches = {} ---@type Flash.Match[]
+      for _, m in ipairs(require("flash.search").new(win, state):get(search_opts)) do
+        -- highlight the typed text, but label the whole word
+        table.insert(matches, vim.tbl_extend("force", get_word_match(m, char, false), { highlight = false }))
+        m.label = false
+        table.insert(matches, m)
+      end
+      return matches
+    end,
     action = function(match, state)
       local Jump = require("flash.jump")
       ---@cast match Flash.Match.TextObject
