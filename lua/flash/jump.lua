@@ -155,12 +155,20 @@ end
 ---@return Flash.Match?
 function M._jump(match, state, opts)
   opts = opts or {}
+  -- a selection kept in Visual mode doesn't include the cursor with selection=exclusive
+  local exclusive = not opts.op and vim.go.selection == "exclusive"
   M.fix_selection()
   M.open_folds(match)
   -- select range
   if state.opts.jump.pos == "range" then
     M.exit_visual()
     M.select_range(match)
+    if exclusive and not match.linewise then
+      -- put the cursor after the last character, like native text objects do
+      local row, col = match.end_pos[1], match.end_pos[2]
+      local line = vim.api.nvim_buf_get_lines(vim.api.nvim_win_get_buf(match.win), row - 1, row, false)[1]
+      vim.api.nvim_win_set_cursor(match.win, { row, col + #vim.fn.strcharpart(line:sub(col + 1), 0, 1) })
+    end
   else
     local pos = state.opts.jump.pos == "start" and match.pos or match.end_pos
 
