@@ -6,6 +6,8 @@ local Pos = require("flash.search.pos")
 ---@field end_pos Pos -- (1,0) indexed
 ---@field label? string|false -- set to false to disable label
 ---@field highlight? boolean
+---@field label_pos? Pos -- where the label before the match goes, defaults to `pos`
+---@field label_end_pos? Pos -- where the label after the match goes, defaults to `end_pos`
 ---@field linewise? boolean -- select linewise with `jump.pos = "range"`
 ---@field fold? number
 

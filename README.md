@@ -426,7 +426,8 @@ Install the plugin with your preferred package manager:
   - Labels all visible text objects of a given type (quotes, brackets, etc.)
   - `opts.around`: `true` for "around" (like `a"`), defaults to `false` for "inside" (like `i"`)
   - After calling, type a text object character (see [supported text objects](#remote-text-objects))
-  - Select a label to operate on that text object, or `<CR>` for the nearest one
+  - Select a label to operate on that text object, or `<CR>` for the highlighted one:
+    the innermost one around the cursor, or else the next one
   - For words (`w`, `W`), type the start of the word first, then select a label
   - Dot-repeat applies the operator to the same kind of text object at or after the cursor
   - **Keymaps are opt-in** - see the [Remote Text Objects example](#remote-text-objects) below

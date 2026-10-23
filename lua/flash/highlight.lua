@@ -193,10 +193,10 @@ function M.update(state)
 
   for _, match in ipairs(state.results) do
     if match.label and after then
-      label(match, match.end_pos, after, true)
+      label(match, match.label_end_pos or match.end_pos, after, true)
     end
     if match.label and before then
-      label(match, match.pos, before, false)
+      label(match, match.label_pos or match.pos, before, false)
     end
   end
 

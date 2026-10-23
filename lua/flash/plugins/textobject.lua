@@ -41,15 +41,13 @@ M.word_objects = {
 -- Types
 --------------------------------------------------------------------------------
 
---- `pos` and `end_pos` span the delimiters (where labels are shown),
---- `select_pos` and `select_end_pos` span the text to operate on.
+--- `pos` and `end_pos` span the whole text object, which is labeled at its
+--- delimiters, `select_pos` and `select_end_pos` span the text to operate on.
 ---@class Flash.Match.TextObject: Flash.Match
 ---@field empty? boolean True if this is an empty inside match (e.g., () or "")
 ---@field select_pos? Pos Selection start, defaults to `pos`
 ---@field select_end_pos? Pos Selection end, defaults to `end_pos`
 ---@field visual_end_pos? Pos Charwise selection end in Visual mode, when it differs
----@field outer_pos? Pos Start of the whole text object, when the delimiters are inside it
----@field outer_end_pos? Pos End of the whole text object, when the delimiters are inside it
 
 ---@class Flash.Match.TextObject.Range
 ---@field select_pos Pos
@@ -57,8 +55,8 @@ M.word_objects = {
 ---@field empty? boolean
 ---@field linewise? boolean
 ---@field visual_end_pos? Pos
----@field outer_pos? Pos
----@field outer_end_pos? Pos
+---@field label_pos? Pos
+---@field label_end_pos? Pos
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -369,10 +367,10 @@ local function get_match_range(buf, node, ctx, delim_positions)
     end
 
     -- Content is between end of start_node and start of end_node,
-    -- so the delimiters are the `>` of the start tag and the `<` of the end tag
+    -- so label the `>` of the start tag and the `<` of the end tag as the delimiters
     local range = get_exact_range(buf, er1, ec1, sr2, sc2)
-    range.outer_pos, range.outer_end_pos = pos, end_pos
-    return Pos({ er1 + 1, ec1 - 1 }), Pos({ sr2 + 1, sc2 }), range
+    range.label_pos, range.label_end_pos = Pos({ er1 + 1, ec1 - 1 }), Pos({ sr2 + 1, sc2 })
+    return pos, end_pos, range
   end
 
   ---@cast delim_positions -nil
@@ -554,16 +552,16 @@ local function deletes_whole_lines(buf, match)
     and get_line(buf, end_pos[1] - 1):sub(end_pos[2] + 2):match("^%s*$") ~= nil
 end
 
---- The innermost text object around the cursor, or else the next one after it
+--- The innermost text object around the cursor, or else the next one after it.
+--- `state.pos` is the cursor from before incremental search moved it.
 ---@param state Flash.State
----@param cursor Pos
 ---@return Flash.Match?
-local function get_repeat_match(state, cursor)
+local function get_nearest_match(state)
+  local cursor = state.pos
   local around, after ---@type Flash.Match?, Flash.Match?
   for _, m in ipairs(state.results) do
-    ---@cast m Flash.Match.TextObject
-    if m.win == state.win and (m.outer_end_pos or m.end_pos) >= cursor then
-      if (m.outer_pos or m.pos) <= cursor then
+    if m.label ~= false and m.win == state.win and m.end_pos >= cursor then
+      if m.pos <= cursor then
         around = (not around or m.pos > around.pos) and m or around
       else
         after = (not after or m.pos < after.pos) and m or after
@@ -571,6 +569,25 @@ local function get_repeat_match(state, cursor)
     end
   end
   return around or after
+end
+
+--- Target the nearest text object instead of the next one, like native text
+--- objects, so it's what <CR> picks. Highlight it, unless all matches are.
+---@param state Flash.State
+local function update_target(state)
+  require("flash.state").update_target(state)
+  local nearest = get_nearest_match(state)
+  if nearest then
+    state.target = nearest
+    if state.opts.search.incremental then
+      vim.api.nvim_win_set_cursor(state.win, nearest.pos)
+    end
+  end
+  if not state.opts.highlight.matches then
+    for _, m in ipairs(state.results) do
+      m.highlight = m == state.target
+    end
+  end
 end
 
 --------------------------------------------------------------------------------
@@ -696,15 +713,18 @@ function M.jump(char, around, opts)
     end,
   })
 
-  -- before incremental search moves the cursor to the first match
-  local cursor = Pos()
   local state = Repeat.get_state("textobject", opts)
+  if not Repeat.is_repeat then
+    -- A dot-repeat reuses the last state, which already has it
+    state.update_target = update_target
+    state:update({ force = true })
+  end
 
   local match ---@type Flash.Match?
   if Repeat.is_repeat then
     -- Dot-repeat can't wait for a label, since the redo buffer would feed it
     -- the text inserted by `c`. Use the text object at or after the cursor.
-    match = get_repeat_match(state, cursor)
+    match = get_nearest_match(state)
   elseif word then
     state:loop({ restore = true, abort = Util.exit })
     return state
