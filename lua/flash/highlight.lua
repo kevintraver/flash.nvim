@@ -104,7 +104,7 @@ function M.update(state)
   ---@cast before number[]
 
   if style == "inline" and before then
-    before[2] = before[2] + 1
+    before = { before[1], before[2] + 1 }
   end
 
   local target = state.target

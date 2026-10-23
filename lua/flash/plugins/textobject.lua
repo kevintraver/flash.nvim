@@ -48,6 +48,8 @@ M.word_objects = {
 ---@field select_pos? Pos Selection start, defaults to `pos`
 ---@field select_end_pos? Pos Selection end, defaults to `end_pos`
 ---@field visual_end_pos? Pos Charwise selection end in Visual mode, when it differs
+---@field outer_pos? Pos Start of the whole text object, when the delimiters are inside it
+---@field outer_end_pos? Pos End of the whole text object, when the delimiters are inside it
 
 ---@class Flash.Match.TextObject.Range
 ---@field select_pos Pos
@@ -55,6 +57,8 @@ M.word_objects = {
 ---@field empty? boolean
 ---@field linewise? boolean
 ---@field visual_end_pos? Pos
+---@field outer_pos? Pos
+---@field outer_end_pos? Pos
 
 --------------------------------------------------------------------------------
 -- Helpers
@@ -364,8 +368,11 @@ local function get_match_range(buf, node, ctx, delim_positions)
       return pos, end_pos, { select_pos = pos, select_end_pos = pos, empty = true }
     end
 
-    -- Content is between end of start_node and start of end_node
-    return pos, end_pos, get_exact_range(buf, er1, ec1, sr2, sc2)
+    -- Content is between end of start_node and start of end_node,
+    -- so the delimiters are the `>` of the start tag and the `<` of the end tag
+    local range = get_exact_range(buf, er1, ec1, sr2, sc2)
+    range.outer_pos, range.outer_end_pos = pos, end_pos
+    return Pos({ er1 + 1, ec1 - 1 }), Pos({ sr2 + 1, sc2 }), range
   end
 
   ---@cast delim_positions -nil
@@ -554,8 +561,9 @@ local function get_repeat_match(state)
   local cursor = Pos(state.win)
   local around, after ---@type Flash.Match?, Flash.Match?
   for _, m in ipairs(state.results) do
-    if m.win == state.win and m.end_pos >= cursor then
-      if m.pos <= cursor then
+    ---@cast m Flash.Match.TextObject
+    if m.win == state.win and (m.outer_end_pos or m.end_pos) >= cursor then
+      if (m.outer_pos or m.pos) <= cursor then
         around = (not around or m.pos > around.pos) and m or around
       else
         after = (not after or m.pos < after.pos) and m or after
@@ -595,9 +603,11 @@ end
 function M.jump(char, around, opts)
   local word = M.word_objects[char]
 
-  -- Words are too numerous to label up front, so type the start of one first
-  local word_opts = word
-    and {
+  local mode_opts ---@type Flash.Config?
+  if word then
+    -- Words are too numerous to label up front, so type the start of one first,
+    -- labeled like `jump()`
+    mode_opts = {
       search = {
         mode = function(str)
           return word.prefix .. "\\V" .. str:gsub("\\", "\\\\")
@@ -605,11 +615,15 @@ function M.jump(char, around, opts)
         incremental = true,
         max_length = false,
       },
-      label = { before = { 0, 0 }, after = false },
+      label = { before = false, after = true, style = "overlay" },
       prompt = { enabled = true },
     }
+  elseif not around then
+    -- Label just inside the delimiters instead of around them
+    mode_opts = { label = { before = { 0, 0 }, after = { 0, 0 } } }
+  end
 
-  opts = Config.get({ mode = "textobject" }, word_opts, opts, {
+  opts = Config.get({ mode = "textobject" }, mode_opts, opts, {
     matcher = not word and function(win, _, search_opts)
       return M.get_matches(win, char, around, search_opts)
     end or nil,

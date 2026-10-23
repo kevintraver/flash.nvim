@@ -239,8 +239,8 @@ local defaults = {
     textobject = {
       jump = { pos = "range", autojump = false },
       search = { multi_window = true, wrap = true, incremental = false, max_length = 0 },
-      -- show the same label on the opening and closing delimiter
-      label = { before = { 0, 0 }, after = { 0, 0 }, style = "overlay" },
+      -- label around the text object, or just inside the delimiters for "inside"
+      label = { before = true, after = true, style = "inline" },
       highlight = {
         backdrop = true,
         matches = false, -- only show labels, not full match highlight

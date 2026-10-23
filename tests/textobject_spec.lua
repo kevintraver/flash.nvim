@@ -264,6 +264,11 @@ describe("textobject", function()
         print("Skipping multi-line tag test: no html parser")
         return
       end
+      -- labeled inside the tags, on the `>` of <div> and the `<` of </div>
+      assert.same({ 1, 4 }, { m.pos[1], m.pos[2] })
+      assert.same({ 3, 0 }, { m.end_pos[1], m.end_pos[2] })
+      assert.same({ 1, 0 }, { m.outer_pos[1], m.outer_pos[2] })
+      assert.same({ 3, 5 }, { m.outer_end_pos[1], m.outer_end_pos[2] })
       -- starts on the line break after <div> and ends on the one before </div>
       assert.same({ 1, 5 }, { m.select_pos[1], m.select_pos[2] })
       assert.same({ 2, 8 }, { m.select_end_pos[1], m.select_end_pos[2] })
