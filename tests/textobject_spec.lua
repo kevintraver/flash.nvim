@@ -183,6 +183,20 @@ describe("textobject", function()
       assert.equals("hello", get_text(m.select_pos, m.select_end_pos))
     end)
 
+    it("selects around quotes with trailing or else leading whitespace", function()
+      set([[local a = f("x", "y")]], { 1, 0 }, "lua")
+      local win = vim.api.nvim_get_current_win()
+
+      local x, y = unpack(TextObject.get_matches(win, '"', true))
+      assert.equals('"x"', get_text(x.pos, x.end_pos))
+      assert.equals('"x"', get_text(x.select_pos, x.select_end_pos))
+      assert.equals(' "y"', get_text(y.select_pos, y.select_end_pos))
+
+      set([[local a = "x"  .. b]], { 1, 0 }, "lua")
+      local m = TextObject.get_matches(win, '"', true)[1]
+      assert.equals('"x"  ', get_text(m.select_pos, m.select_end_pos))
+    end)
+
     it("marks empty pairs with the cursor position between the delimiters", function()
       set([[local a = f("")]], { 1, 0 }, "lua")
       local win = vim.api.nvim_get_current_win()

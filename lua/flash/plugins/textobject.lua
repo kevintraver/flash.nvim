@@ -86,6 +86,20 @@ local function get_line(buf, row)
   return vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ""
 end
 
+--- Extend a range with its trailing whitespace, or else its leading whitespace, like `aw` and `a"`
+---@param buf number
+---@param pos Pos first character
+---@param end_pos Pos last character
+---@return Pos pos, Pos end_pos
+local function with_whitespace(buf, pos, end_pos)
+  local trailing = get_line(buf, end_pos[1] - 1):sub(end_pos[2] + 2):match("^[ \t]+")
+  if trailing then
+    return pos, Pos({ end_pos[1], end_pos[2] + #trailing })
+  end
+  local leading = get_line(buf, pos[1] - 1):sub(1, pos[2]):match("[ \t]*$")
+  return Pos({ pos[1], pos[2] - #leading }), end_pos
+end
+
 --- Check if content contains an unescaped delimiter (for symmetric delimiters like quotes)
 ---@param content string
 ---@param delim string
@@ -358,11 +372,13 @@ local function get_match_range(buf, node, ctx, delim_positions)
   local open_row, open_col = delim_positions.open_row, delim_positions.open_col
   local close_row, close_col = delim_positions.close_row, delim_positions.close_col
   local pos, end_pos = Pos({ open_row + 1, open_col }), Pos({ close_row + 1, close_col })
-  if ctx.around then
+  local quote = ctx.delim.open == ctx.delim.close
+  if ctx.around and quote then
+    local select_pos, select_end_pos = with_whitespace(buf, pos, end_pos)
+    return pos, end_pos, { select_pos = select_pos, select_end_pos = select_end_pos }
+  elseif ctx.around then
     return pos, end_pos
-  end
-
-  if ctx.delim.open == ctx.delim.close then
+  elseif quote then
     return pos, end_pos, get_exact_range(buf, open_row, open_col + 1, close_row, close_col)
   end
   return pos, end_pos, get_block_range(buf, open_row, open_col, close_row, close_col)
@@ -462,20 +478,11 @@ local function get_word_match(match, char, around)
     return match
   end
 
+  local pos, end_pos = Pos({ match.pos[1], s }), Pos({ match.pos[1], e - 1 })
   if around then
-    local trailing = vim.fn.matchend(line, "^\\s\\+", e)
-    if trailing ~= -1 then
-      e = trailing
-    else
-      local leading = vim.fn.match(line:sub(1, s), "\\s\\+$")
-      s = leading ~= -1 and leading or s
-    end
+    pos, end_pos = with_whitespace(buf, pos, end_pos)
   end
-
-  return vim.tbl_extend("force", {}, match, {
-    pos = Pos({ match.pos[1], s }),
-    end_pos = Pos({ match.pos[1], e - 1 }),
-  })
+  return vim.tbl_extend("force", {}, match, { pos = pos, end_pos = end_pos })
 end
 
 --- Collect all matches without sorting
@@ -699,7 +706,7 @@ function M.remote(opts)
   opts = opts or {}
   local around = opts.around or false
 
-  -- Dot-repeat reuses the text object type and only asks for a new label
+  -- Dot-repeat reuses the text object type
   local char = Repeat.is_repeat and M.last_char or vim.fn.getcharstr()
   if char == Util.ESC then
     Util.exit()
