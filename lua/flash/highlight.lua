@@ -138,8 +138,9 @@ function M.update(state)
       hl_group = state.rainbow:get(match)
     elseif
       -- set hl_group to current if the match is the current target
-      -- and the target is a single character
-      target
+      -- and the target is a single character, covered by the label
+      style == "overlay"
+      and target
       and target.pos[1] == row + 1
       and target.pos[2] == col
       and target.pos == target.end_pos

@@ -645,10 +645,16 @@ function M.jump(char, around, opts)
       end
       local matches = {} ---@type Flash.Match[]
       for _, m in ipairs(require("flash.search").new(win, state):get(search_opts)) do
-        -- highlight the typed text, but label the whole word
-        table.insert(matches, vim.tbl_extend("force", get_word_match(m, char, around), { highlight = false }))
-        m.label = false
-        table.insert(matches, m)
+        local word_match = get_word_match(m, char, around)
+        if word_match.pos == m.pos and word_match.end_pos == m.end_pos then
+          -- the typed text is the whole word, and flash keeps one match per range
+          table.insert(matches, word_match)
+        else
+          -- highlight the typed text, but label the whole word
+          table.insert(matches, vim.tbl_extend("force", word_match, { highlight = false }))
+          m.label = false
+          table.insert(matches, m)
+        end
       end
       return matches
     end,
