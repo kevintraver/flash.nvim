@@ -379,8 +379,7 @@ local function get_match_range(buf, node, ctx, delim_positions)
   local pos, end_pos = Pos({ open_row + 1, open_col }), Pos({ close_row + 1, close_col })
   local quote = ctx.delim.open == ctx.delim.close
   if ctx.around and quote then
-    local select_pos, select_end_pos = with_whitespace(buf, pos, end_pos)
-    return pos, end_pos, { select_pos = select_pos, select_end_pos = select_end_pos }
+    return with_whitespace(buf, pos, end_pos)
   elseif ctx.around then
     return pos, end_pos
   elseif quote then
@@ -632,12 +631,11 @@ function M.jump(char, around, opts)
         incremental = true,
         max_length = false,
       },
+      -- a word is short, so one label at its start is enough
+      label = { after = false },
       highlight = { matches = true },
       prompt = { enabled = true },
     }
-  elseif not around then
-    -- Label just inside the delimiters instead of around them
-    mode_opts = { label = { before = { 0, 0 }, after = { 0, 0 } } }
   end
 
   opts = Config.get({ mode = "textobject" }, mode_opts, opts, {
@@ -648,7 +646,7 @@ function M.jump(char, around, opts)
       local matches = {} ---@type Flash.Match[]
       for _, m in ipairs(require("flash.search").new(win, state):get(search_opts)) do
         -- highlight the typed text, but label the whole word
-        table.insert(matches, vim.tbl_extend("force", get_word_match(m, char, false), { highlight = false }))
+        table.insert(matches, vim.tbl_extend("force", get_word_match(m, char, around), { highlight = false }))
         m.label = false
         table.insert(matches, m)
       end
@@ -712,6 +710,15 @@ function M.jump(char, around, opts)
       Jump.on_jump(state)
     end,
   })
+
+  if not word and not around then
+    -- Labels go one character further in, just inside the delimiters
+    local before, after = opts.label.before, opts.label.after
+    before = before == true and { 0, -1 } or before
+    after = after == true and { 0, 1 } or after
+    opts.label.before = before and { before[1], before[2] + 1 }
+    opts.label.after = after and { after[1], after[2] - 1 }
+  end
 
   local state = Repeat.get_state("textobject", opts)
   if not Repeat.is_repeat then

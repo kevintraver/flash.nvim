@@ -109,7 +109,7 @@ function M.update(state)
 
   local target = state.target
 
-  ---@type table<string, {buf: number, row: number, col: number, text:string[][]}>
+  ---@type table<string, {buf: number, row: number, col: number, text:string[][], matches:table<Flash.Match, boolean>}>
   local extmarks = {}
 
   ---@param match Flash.Match
@@ -158,7 +158,12 @@ function M.update(state)
     else
       -- else highlight the label
       local key = buf .. ":" .. row .. ":" .. col
-      extmarks[key] = extmarks[key] or { buf = buf, row = row, col = col, text = {} }
+      extmarks[key] = extmarks[key] or { buf = buf, row = row, col = col, text = {}, matches = {} }
+      -- show a label once when its before and after positions meet, like in `""`
+      if extmarks[key].matches[match] then
+        return
+      end
+      extmarks[key].matches[match] = true
       local text = state.opts.label.format({
         state = state,
         match = match,
