@@ -472,17 +472,10 @@ local function get_delimiter_matches(win, delim, around, opts, char)
     seen = {},
   }
 
-  parser:parse()
+  -- parse the visible rows, with the languages injected in them
+  parser:parse({ ctx.from_row, ctx.to_row + 1 })
   parser:for_each_tree(function(tstree)
-    if not tstree then
-      return
-    end
-    local root = tstree:root()
-    if not root then
-      return
-    end
-
-    for node in root:iter_children() do
+    for node in tstree:root():iter_children() do
       collect_nodes(node, ctx)
     end
   end)
