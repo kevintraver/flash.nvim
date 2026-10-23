@@ -619,6 +619,7 @@ end
 function M.jump(char, around, opts)
   local word = M.word_objects[char]
 
+  local jumped = false
   local mode_opts ---@type Flash.Config?
   if word then
     -- Words are too numerous to label up front, so type the start of one first,
@@ -628,7 +629,6 @@ function M.jump(char, around, opts)
         mode = function(str)
           return word.prefix .. "\\V" .. str:gsub("\\", "\\\\")
         end,
-        incremental = true,
         max_length = false,
       },
       -- a word is short, so one label at its start is enough
@@ -659,6 +659,7 @@ function M.jump(char, around, opts)
       return matches
     end,
     action = function(match, state)
+      jumped = true
       local Jump = require("flash.jump")
       ---@cast match Flash.Match.TextObject
 
@@ -739,7 +740,13 @@ function M.jump(char, around, opts)
     -- the text inserted by `c`. Use the text object at or after the cursor.
     match = get_nearest_match(state)
   elseif word then
-    state:loop({ restore = true, abort = Util.exit })
+    state:loop()
+    if not jumped then
+      -- A key that matches no word ends the search, so cancel the operator
+      -- like an invalid text object, instead of running it on the cursor
+      state:restore()
+      Util.exit()
+    end
     return state
   else
     -- A label picks a text object and <CR> the nearest one.
