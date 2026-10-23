@@ -556,9 +556,9 @@ end
 
 --- The innermost text object around the cursor, or else the next one after it
 ---@param state Flash.State
+---@param cursor Pos
 ---@return Flash.Match?
-local function get_repeat_match(state)
-  local cursor = Pos(state.win)
+local function get_repeat_match(state, cursor)
   local around, after ---@type Flash.Match?, Flash.Match?
   for _, m in ipairs(state.results) do
     ---@cast m Flash.Match.TextObject
@@ -686,13 +686,15 @@ function M.jump(char, around, opts)
     end,
   })
 
+  -- before incremental search moves the cursor to the first match
+  local cursor = Pos()
   local state = Repeat.get_state("textobject", opts)
 
   local match ---@type Flash.Match?
   if Repeat.is_repeat then
     -- Dot-repeat can't wait for a label, since the redo buffer would feed it
     -- the text inserted by `c`. Use the text object at or after the cursor.
-    match = get_repeat_match(state)
+    match = get_repeat_match(state, cursor)
   elseif word then
     state:loop({ restore = true, abort = Util.exit })
     return state
