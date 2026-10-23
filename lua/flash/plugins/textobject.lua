@@ -755,7 +755,17 @@ function M.jump(char, around, opts)
     opts.label.after = after and { after[1], after[2] - 1 }
   end
 
-  local state = Repeat.get_state("textobject", opts)
+  -- `.` repeats the last change, so only keep the state of a change for it,
+  -- and not of a yank or a Visual selection
+  local op = vim.fn.mode(true):sub(1, 2) == "no" and vim.v.operator
+  local repeatable = op and (op ~= "y" or vim.o.cpoptions:find("y", 1, true) ~= nil)
+  local state ---@type Flash.State
+  if Repeat.is_repeat or repeatable then
+    state = Repeat.get_state("textobject", opts)
+    M.last_char = char
+  else
+    state = require("flash.state").new(opts)
+  end
   if not Repeat.is_repeat then
     -- A dot-repeat reuses the last state, which already has it
     state.update_target = update_target
@@ -816,7 +826,6 @@ function M.remote(opts)
     return
   end
 
-  M.last_char = char
   return M.jump(char, around, opts)
 end
 
