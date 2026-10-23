@@ -706,19 +706,22 @@ function M.jump(char, around, opts)
         vim.api.nvim_buf_set_text(buf, row, col, row, col, { " " })
         selection.end_pos = selection.pos
 
-        -- Keep the space out of the registers
-        local registers = {}
-        for _, name in ipairs({ '"', "-", vim.v.register }) do
-          registers[name] = vim.fn.getreginfo(name)
+        -- Keep the space out of the registers. The black hole register
+        -- keeps it out already, and doesn't trigger TextYankPost.
+        if vim.v.register ~= "_" then
+          local registers = {}
+          for _, name in ipairs({ '"', "-", vim.v.register }) do
+            registers[name] = vim.fn.getreginfo(name)
+          end
+          vim.api.nvim_create_autocmd("TextYankPost", {
+            once = true,
+            callback = function()
+              for name, info in pairs(registers) do
+                vim.fn.setreg(name, info)
+              end
+            end,
+          })
         end
-        vim.api.nvim_create_autocmd("TextYankPost", {
-          once = true,
-          callback = function()
-            for name, info in pairs(registers) do
-              vim.fn.setreg(name, info)
-            end
-          end,
-        })
       elseif match.empty then
         -- Capture operator state BEFORE exiting (mode will change after exit)
         local op_state = {
